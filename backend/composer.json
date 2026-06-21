@@ -1,0 +1,23 @@
+{
+    "name": "order/state-machine",
+    "description": "订单状态机流转系统",
+    "type": "project",
+    "require": {
+        "php": ">=7.4",
+        "ext-pdo": "*",
+        "ext-json": "*"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^9.6"
+    },
+    "autoload": {
+        "psr-4": {
+            "Order\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Order\\Tests\\": "tests/"
+        }
+    }
+}
