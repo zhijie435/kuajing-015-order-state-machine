@@ -1,0 +1,66 @@
+<?php
+
+namespace Dealer\Wallet\Model;
+
+use Dealer\Wallet\Enum\TransactionType;
+
+class Transaction
+{
+    public int $id = 0;
+    public int $walletId = 0;
+    public int $dealerId = 0;
+    public int $type = 0;
+    public float $amount = 0.0;
+    public float $balanceBefore = 0.0;
+    public float $balanceAfter = 0.0;
+    public float $frozenBefore = 0.0;
+    public float $frozenAfter = 0.0;
+    public string $relatedNo = '';
+    public string $operator = '';
+    public string $remark = '';
+    public string $createdAt = '';
+
+    public function __construct(array $data = [])
+    {
+        foreach ($data as $key => $value) {
+            $property = lcfirst(str_replace('_', '', ucwords($key, '_')));
+            if (property_exists($this, $property)) {
+                $this->$property = $this->castProperty($property, $value);
+            }
+        }
+    }
+
+    private function castProperty(string $property, $value)
+    {
+        $intProps = ['id', 'walletId', 'dealerId', 'type'];
+        $floatProps = ['amount', 'balanceBefore', 'balanceAfter', 'frozenBefore', 'frozenAfter'];
+        if (in_array($property, $intProps, true)) {
+            return (int)$value;
+        }
+        if (in_array($property, $floatProps, true)) {
+            return (float)$value;
+        }
+        return (string)$value;
+    }
+
+    public function toArray(): array
+    {
+        return [
+            'id' => $this->id,
+            'wallet_id' => $this->walletId,
+            'dealer_id' => $this->dealerId,
+            'type' => $this->type,
+            'type_name' => TransactionType::getName($this->type),
+            'direction' => TransactionType::getDirection($this->type),
+            'amount' => number_format($this->amount, 2, '.', ''),
+            'balance_before' => number_format($this->balanceBefore, 2, '.', ''),
+            'balance_after' => number_format($this->balanceAfter, 2, '.', ''),
+            'frozen_before' => number_format($this->frozenBefore, 2, '.', ''),
+            'frozen_after' => number_format($this->frozenAfter, 2, '.', ''),
+            'related_no' => $this->relatedNo,
+            'operator' => $this->operator,
+            'remark' => $this->remark,
+            'created_at' => $this->createdAt,
+        ];
+    }
+}
