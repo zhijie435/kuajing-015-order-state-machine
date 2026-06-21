@@ -246,7 +246,7 @@ class WalletService
             $result['deducted_amount'] = number_format($deductAmount, 2, '.', '');
             $result['remaining_amount'] = number_format($newRemaining, 2, '.', '');
             return $result;
-        }, ['freeze_no' => $freezeNo, 'amount' => $amount]);
+        }, ['freeze_no' => $freezeNo, 'amount' => $amount, 'operation_name' => '冻结资金扣除']);
     }
 
     public function getTransactions(int $dealerId, int $page = 1, int $pageSize = 20): array

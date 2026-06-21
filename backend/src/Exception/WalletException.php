@@ -44,8 +44,8 @@ class WalletException extends \RuntimeException
             'code' => $this->getCode(),
             'file' => $this->getFile(),
             'line' => $this->getLine(),
-            'rollback' => $this->rollbackInfo,
-            'retry' => $this->retryInfo,
+            'rollback_info' => $this->rollbackInfo,
+            'retry_info' => $this->retryInfo,
         ];
     }
 }

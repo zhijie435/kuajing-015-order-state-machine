@@ -261,7 +261,7 @@ class OrderService
         ];
     }
 
-    public function listOrders(int $page = 1, int $pageSize = 20, string $status = '', int $userId = 0): array
+    public function listOrders(int $page = 1, int $pageSize = 20, string $status = '', int $userId = 0, array $filters = []): array
     {
         $where = [];
         $params = [];
@@ -274,6 +274,58 @@ class OrderService
         if ($userId > 0) {
             $where[] = 'user_id = ?';
             $params[] = $userId;
+        }
+
+        if (!empty($filters['audit_status'])) {
+            $where[] = 'audit_status = ?';
+            $params[] = $filters['audit_status'];
+        }
+
+        if (!empty($filters['exception_type'])) {
+            $where[] = 'exception_type = ?';
+            $params[] = $filters['exception_type'];
+        }
+
+        if (isset($filters['has_exception']) && $filters['has_exception'] !== '') {
+            if ($filters['has_exception'] === true || $filters['has_exception'] === 'true' || $filters['has_exception'] === '1') {
+                $where[] = '(status = ? OR exception_level > 0)';
+                $params[] = \Order\Enums\OrderStatus::EXCEPTION;
+            } elseif ($filters['has_exception'] === false || $filters['has_exception'] === 'false' || $filters['has_exception'] === '0') {
+                $where[] = '(status != ? AND exception_level = 0)';
+                $params[] = \Order\Enums\OrderStatus::EXCEPTION;
+            }
+        }
+
+        if (!empty($filters['exception_level'])) {
+            $where[] = 'exception_level >= ?';
+            $params[] = (int) $filters['exception_level'];
+        }
+
+        if (isset($filters['rollback_protected']) && $filters['rollback_protected'] !== '') {
+            $where[] = 'rollback_protected = ?';
+            $params[] = ($filters['rollback_protected'] ? 1 : 0);
+        }
+
+        if (!empty($filters['writeback_status'])) {
+            $where[] = 'writeback_status = ?';
+            $params[] = $filters['writeback_status'];
+        }
+
+        if (!empty($filters['min_amount'])) {
+            $where[] = 'total_amount >= ?';
+            $params[] = (float) $filters['min_amount'];
+        }
+
+        if (!empty($filters['max_amount'])) {
+            $where[] = 'total_amount <= ?';
+            $params[] = (float) $filters['max_amount'];
+        }
+
+        if (!empty($filters['keyword'])) {
+            $where[] = '(order_no LIKE ? OR CAST(user_id AS CHAR) LIKE ?)';
+            $keyword = '%' . $filters['keyword'] . '%';
+            $params[] = $keyword;
+            $params[] = $keyword;
         }
 
         $whereSql = !empty($where) ? 'WHERE ' . implode(' AND ', $where) : '';
@@ -300,6 +352,7 @@ class OrderService
             'page_size' => $pageSize,
             'total_pages' => (int) ceil($total / $pageSize),
             'items' => $orders,
+            'filters' => $filters,
         ];
     }
 

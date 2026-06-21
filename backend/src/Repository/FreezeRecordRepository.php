@@ -81,7 +81,12 @@ class FreezeRecordRepository
         $stmt->bindValue(':status', $status, PDO::PARAM_INT);
         $stmt->bindValue(':id', $record->id, PDO::PARAM_INT);
         $stmt->execute();
-        return $stmt->rowCount() > 0;
+        $success = $stmt->rowCount() > 0;
+        if ($success) {
+            $record->remainingAmount = $remainingAmount;
+            $record->status = $status;
+        }
+        return $success;
     }
 
     public function generateFreezeNo(): string
