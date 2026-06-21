@@ -24,7 +24,6 @@ class WalletService
     private TransactionRepository $transactionRepository;
     private FreezeRecordRepository $freezeRecordRepository;
     private ReconciliationService $reconciliationService;
-    private PermissionService $permissionService;
     /** @var PDO|MockDatabase */
     private $pdo;
 
@@ -34,13 +33,7 @@ class WalletService
         $this->transactionRepository = new TransactionRepository();
         $this->freezeRecordRepository = new FreezeRecordRepository();
         $this->reconciliationService = new ReconciliationService();
-        $this->permissionService = new PermissionService();
         $this->pdo = Database::getConnection();
-    }
-
-    public function getPermissionService(): PermissionService
-    {
-        return $this->permissionService;
     }
 
     public function getWallet(int $dealerId): array
@@ -55,7 +48,7 @@ class WalletService
 
     public function listWallets(int $page = 1, int $pageSize = 20): array
     {
-        if (!$this->permissionService->isAdmin()) {
+        if (!PermissionService::isAdmin()) {
             throw WalletPermissionException::forAdminRequired('查看钱包列表');
         }
         return [
@@ -313,7 +306,7 @@ class WalletService
 
     public function fixWalletInconsistency(int $dealerId, string $operator = 'system'): array
     {
-        if (!$this->permissionService->hasPermission(PermissionService::PERM_WALLET_FIX)) {
+        if (!PermissionService::hasPermission(PermissionService::PERM_WALLET_FIX)) {
             throw WalletPermissionException::forScopeDenied('修复钱包异常数据', PermissionService::PERM_WALLET_FIX);
         }
         return $this->reconciliationService->fixWalletInconsistency($dealerId, $operator);
@@ -380,8 +373,8 @@ class WalletService
 
     private function assertCanViewWallet(int $dealerId): void
     {
-        if (!$this->permissionService->canViewWallet($dealerId)) {
-            $currentDealerId = $this->permissionService->getCurrentDealerId();
+        if (!PermissionService::canViewWallet($dealerId)) {
+            $currentDealerId = PermissionService::getCurrentDealerId();
             if ($currentDealerId !== null) {
                 throw WalletPermissionException::forDealerMismatch($dealerId, $currentDealerId);
             }
@@ -391,11 +384,11 @@ class WalletService
 
     private function assertCanOperateWallet(int $dealerId, string $operationName): void
     {
-        if ($this->permissionService->isAdmin()) {
+        if (PermissionService::isAdmin()) {
             return;
         }
-        if (!$this->permissionService->canViewWallet($dealerId)) {
-            $currentDealerId = $this->permissionService->getCurrentDealerId();
+        if (!PermissionService::canViewWallet($dealerId)) {
+            $currentDealerId = PermissionService::getCurrentDealerId();
             if ($currentDealerId !== null) {
                 throw WalletPermissionException::forDealerMismatch($dealerId, $currentDealerId);
             }
@@ -405,10 +398,10 @@ class WalletService
 
     private function assertCanCreateWallet(int $dealerId): void
     {
-        if ($this->permissionService->isAdmin()) {
+        if (PermissionService::isAdmin()) {
             return;
         }
-        $currentDealerId = $this->permissionService->getCurrentDealerId();
+        $currentDealerId = PermissionService::getCurrentDealerId();
         if ($currentDealerId === null) {
             throw WalletPermissionException::forAdminRequired('创建钱包');
         }

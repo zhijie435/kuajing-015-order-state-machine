@@ -11,17 +11,17 @@ class Transition
     private string $fromStatus;
     private string $event;
     private string $toStatus;
-    private ?callable $guard;
-    private ?callable $beforeCallback;
-    private ?callable $afterCallback;
+    private $guard;
+    private $beforeCallback;
+    private $afterCallback;
 
     public function __construct(
         string $fromStatus,
         string $event,
         string $toStatus,
-        ?callable $guard = null,
-        ?callable $beforeCallback = null,
-        ?callable $afterCallback = null
+        $guard = null,
+        $beforeCallback = null,
+        $afterCallback = null
     ) {
         $this->fromStatus = $fromStatus;
         $this->event = $event;

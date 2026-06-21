@@ -15,7 +15,7 @@ class PermissionService
     public const PERM_WALLET_FIX = 'wallet:fix';
     public const PERM_WALLET_EXPORT = 'wallet:export';
 
-    private array $operatorContext = [
+    private static array $operatorContext = [
         'operator_id' => null,
         'dealer_id' => null,
         'roles' => [],
@@ -23,51 +23,86 @@ class PermissionService
         'scoped_dealer_ids' => null,
     ];
 
-    public function setOperatorContext(array $context): void
+    public static function setOperatorContext(?string $operatorId = null, ?string $role = null, ?int $dealerId = null): void
     {
-        $this->operatorContext = array_merge($this->operatorContext, $context);
+        if ($operatorId !== null) {
+            self::$operatorContext['operator_id'] = $operatorId;
+        }
+        if ($role !== null) {
+            $perms = self::getPermissionsByRole($role);
+            self::$operatorContext['roles'] = [$role];
+            self::$operatorContext['permissions'] = $perms;
+        }
+        if ($dealerId !== null) {
+            self::$operatorContext['dealer_id'] = $dealerId;
+        }
     }
 
-    public function getOperatorContext(): array
+    private static function getPermissionsByRole(string $role): array
     {
-        return $this->operatorContext;
+        $map = [
+            self::ROLE_SUPER_ADMIN => ['*'],
+            self::ROLE_WALLET_ADMIN => [
+                self::PERM_WALLET_VIEW_ALL,
+                self::PERM_WALLET_TRANSACTIONS_ALL,
+                self::PERM_WALLET_FREEZE_ALL,
+                self::PERM_WALLET_RECONCILE,
+                self::PERM_WALLET_FIX,
+                self::PERM_WALLET_EXPORT,
+            ],
+            self::ROLE_DEALER => [
+                self::PERM_WALLET_VIEW_OWN,
+            ],
+            self::ROLE_AUDITOR => [
+                self::PERM_WALLET_VIEW_ALL,
+                self::PERM_WALLET_TRANSACTIONS_ALL,
+                self::PERM_WALLET_RECONCILE,
+                self::PERM_WALLET_EXPORT,
+            ],
+        ];
+        return $map[$role] ?? [];
     }
 
-    public function getCurrentDealerId(): ?int
+    public static function getOperatorContext(): array
     {
-        return $this->operatorContext['dealer_id'] ?? null;
+        return self::$operatorContext;
     }
 
-    public function isAdmin(): bool
+    public static function getCurrentDealerId(): ?int
     {
-        $roles = $this->operatorContext['roles'] ?? [];
+        return self::$operatorContext['dealer_id'] ?? null;
+    }
+
+    public static function isAdmin(): bool
+    {
+        $roles = self::$operatorContext['roles'] ?? [];
         return in_array(self::ROLE_SUPER_ADMIN, $roles, true)
             || in_array(self::ROLE_WALLET_ADMIN, $roles, true);
     }
 
-    public function hasPermission(string $permission): bool
+    public static function hasPermission(string $permission): bool
     {
-        $perms = $this->operatorContext['permissions'] ?? [];
+        $perms = self::$operatorContext['permissions'] ?? [];
         if (in_array('*', $perms, true)) {
             return true;
         }
         return in_array($permission, $perms, true);
     }
 
-    public function canViewWallet(int $dealerId): bool
+    public static function canViewWallet(int $dealerId): bool
     {
-        if ($this->isAdmin()) {
-            if ($this->hasPermission(self::PERM_WALLET_VIEW_ALL)) {
+        if (self::isAdmin()) {
+            if (self::hasPermission(self::PERM_WALLET_VIEW_ALL)) {
                 return true;
             }
         }
 
-        $currentDealerId = $this->getCurrentDealerId();
+        $currentDealerId = self::getCurrentDealerId();
         if ($currentDealerId !== null && $currentDealerId === $dealerId) {
-            return $this->hasPermission(self::PERM_WALLET_VIEW_OWN);
+            return self::hasPermission(self::PERM_WALLET_VIEW_OWN);
         }
 
-        $scoped = $this->operatorContext['scoped_dealer_ids'] ?? null;
+        $scoped = self::$operatorContext['scoped_dealer_ids'] ?? null;
         if ($scoped === '*') {
             return true;
         }
@@ -78,8 +113,8 @@ class PermissionService
         return false;
     }
 
-    public function canOperateWallet(int $dealerId): bool
+    public static function canOperateWallet(int $dealerId): bool
     {
-        return $this->canViewWallet($dealerId);
+        return self::canViewWallet($dealerId);
     }
 }
