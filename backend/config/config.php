@@ -4,10 +4,25 @@ return [
     'db' => [
         'host' => $_ENV['DB_HOST'] ?? '127.0.0.1',
         'port' => $_ENV['DB_PORT'] ?? '3306',
-        'name' => $_ENV['DB_NAME'] ?? 'dealer_wallet',
+        'name' => $_ENV['DB_NAME'] ?? 'overseas_warehouse',
         'user' => $_ENV['DB_USER'] ?? 'root',
         'pass' => $_ENV['DB_PASS'] ?? '',
         'charset' => 'utf8mb4',
+    ],
+    'callback' => [
+        'token' => $_ENV['CALLBACK_TOKEN'] ?? 'wh_callback_token_2024',
+        'ip_whitelist' => isset($_ENV['CALLBACK_IP_WHITELIST']) ? explode(',', $_ENV['CALLBACK_IP_WHITELIST']) : [
+            '127.0.0.1',
+            '10.0.0.0/8',
+            '192.168.0.0/16',
+        ],
+    ],
+    'order' => [
+        'no_prefix' => $_ENV['ORDER_NO_PREFIX'] ?? 'WH',
+        'max_quantity_per_item' => (int)($_ENV['ORDER_MAX_QUANTITY_PER_ITEM'] ?? 999),
+    ],
+    'warehouse' => [
+        'default_priority' => (int)($_ENV['WAREHOUSE_DEFAULT_PRIORITY'] ?? 0),
     ],
     'state_machine' => [
         'strict_validation' => $_ENV['STATE_MACHINE_STRICT_VALIDATION'] ?? true,
@@ -98,6 +113,14 @@ return [
         'time_window_hours' => (int)($_ENV['ORDER_ROLLBACK_PROTECTION_TIME_WINDOW_HOURS'] ?? 24),
         'terminal_status_protected' => (bool)($_ENV['ORDER_ROLLBACK_PROTECTION_TERMINAL_STATUS'] ?? true),
         'max_rollback_count' => (int)($_ENV['ORDER_ROLLBACK_PROTECTION_MAX_ROLLBACK_COUNT'] ?? 3),
+    ],
+    'order_exception' => [
+        'enabled' => (bool)($_ENV['ORDER_EXCEPTION_ENABLED'] ?? true),
+        'auto_detect_enabled' => (bool)($_ENV['ORDER_EXCEPTION_AUTO_DETECT_ENABLED'] ?? true),
+        'notify_enabled' => (bool)($_ENV['ORDER_EXCEPTION_NOTIFY_ENABLED'] ?? true),
+        'notify_email' => $_ENV['ORDER_EXCEPTION_NOTIFY_EMAIL'] ?? 'admin@example.com',
+        'high_level_auto_escalate' => (bool)($_ENV['ORDER_EXCEPTION_HIGH_LEVEL_AUTO_ESCALATE'] ?? true),
+        'escalate_hours' => (int)($_ENV['ORDER_EXCEPTION_ESCALATE_HOURS'] ?? 24),
     ],
     'order_writeback' => [
         'enabled' => (bool)($_ENV['ORDER_WRITEBACK_ENABLED'] ?? true),
