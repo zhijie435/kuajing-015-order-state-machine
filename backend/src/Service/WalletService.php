@@ -61,72 +61,60 @@ class WalletService
 
     public function recharge(int $dealerId, float $amount, array $options = []): array
     {
-        $this->validateAmount($amount);
-        $this->assertCanOperateWallet($dealerId, '钱包充值');
-
         return $this->executeBalanceChange(
             $dealerId,
             $amount,
             TransactionType::RECHARGE,
             true,
             $options,
-            ['dealer_id' => $dealerId, 'amount' => $amount]
+            ['dealer_id' => $dealerId, 'amount' => $amount, 'operation_name' => '钱包充值']
         );
     }
 
     public function withdraw(int $dealerId, float $amount, array $options = []): array
     {
-        $this->validateAmount($amount);
-        $this->assertCanOperateWallet($dealerId, '余额提现');
-
         return $this->executeBalanceChange(
             $dealerId,
             $amount,
             TransactionType::WITHDRAW,
             false,
             $options,
-            ['dealer_id' => $dealerId, 'amount' => $amount],
+            ['dealer_id' => $dealerId, 'amount' => $amount, 'operation_name' => '余额提现'],
             true
         );
     }
 
     public function consume(int $dealerId, float $amount, array $options = []): array
     {
-        $this->validateAmount($amount);
-        $this->assertCanOperateWallet($dealerId, '余额消费');
-
         return $this->executeBalanceChange(
             $dealerId,
             $amount,
             TransactionType::CONSUME,
             false,
             $options,
-            ['dealer_id' => $dealerId, 'amount' => $amount],
+            ['dealer_id' => $dealerId, 'amount' => $amount, 'operation_name' => '余额消费'],
             true
         );
     }
 
     public function refund(int $dealerId, float $amount, array $options = []): array
     {
-        $this->validateAmount($amount);
-        $this->assertCanOperateWallet($dealerId, '消费退款');
-
         return $this->executeBalanceChange(
             $dealerId,
             $amount,
             TransactionType::REFUND,
             true,
             $options,
-            ['dealer_id' => $dealerId, 'amount' => $amount]
+            ['dealer_id' => $dealerId, 'amount' => $amount, 'operation_name' => '消费退款']
         );
     }
 
     public function freeze(int $dealerId, float $amount, array $options = []): array
     {
-        $this->validateAmount($amount);
-        $this->assertCanOperateWallet($dealerId, '资金冻结');
-
         return $this->executeTransaction(function () use ($dealerId, $amount, $options) {
+            $this->validateAmount($amount);
+            $this->assertCanOperateWallet($dealerId, '资金冻结');
+
             $wallet = $this->getWalletForUpdate($dealerId);
             $this->assertSufficientAvailable($wallet, $amount, '冻结');
 
@@ -160,14 +148,13 @@ class WalletService
             $result['status_transition'] = $transition;
             $result['freeze_no'] = $freezeNo;
             return $result;
-        }, ['dealer_id' => $dealerId, 'amount' => $amount]);
+        }, ['dealer_id' => $dealerId, 'amount' => $amount, 'operation_name' => '资金冻结']);
     }
 
     public function unfreeze(string $freezeNo, float $amount = null, array $options = []): array
     {
-        $this->assertCanOperateWallet(0, '资金解冻');
-
         return $this->executeTransaction(function () use ($freezeNo, $amount, $options) {
+            $this->assertCanOperateWallet(0, '资金解冻');
             $record = $this->findFreezeRecordForUpdate($freezeNo, '解冻');
             $wallet = $this->getWalletForUpdate($record->dealerId);
 
@@ -207,14 +194,13 @@ class WalletService
             $result['unfrozen_amount'] = number_format($unfreezeAmount, 2, '.', '');
             $result['remaining_amount'] = number_format($newRemaining, 2, '.', '');
             return $result;
-        }, ['freeze_no' => $freezeNo, 'amount' => $amount]);
+        }, ['freeze_no' => $freezeNo, 'amount' => $amount, 'operation_name' => '资金解冻']);
     }
 
     public function deductFrozen(string $freezeNo, float $amount = null, array $options = []): array
     {
-        $this->assertCanOperateWallet(0, '冻结资金扣除');
-
         return $this->executeTransaction(function () use ($freezeNo, $amount, $options) {
+            $this->assertCanOperateWallet(0, '冻结资金扣除');
             $record = $this->findFreezeRecordForUpdate($freezeNo, '扣除');
             $wallet = $this->getWalletForUpdate($record->dealerId);
 
@@ -321,7 +307,11 @@ class WalletService
         array $context,
         bool $checkAvailable = false
     ): array {
-        return $this->executeTransaction(function () use ($dealerId, $amount, $txType, $isIncrease, $options, $checkAvailable) {
+        $operationName = $context['operation_name'] ?? '余额变更';
+        return $this->executeTransaction(function () use ($dealerId, $amount, $txType, $isIncrease, $options, $checkAvailable, $operationName) {
+            $this->validateAmount($amount);
+            $this->assertCanOperateWallet($dealerId, $operationName);
+
             $wallet = $isIncrease
                 ? $this->getOrCreateWalletForUpdate($dealerId)
                 : $this->getWalletForUpdate($dealerId);

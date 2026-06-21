@@ -36,41 +36,7 @@ class OrderServiceTest extends TestCase
         Database::resetInstance();
     }
 
-    public function testCreateOrder()
-    {
-        $service = $this->createMock(OrderService::class, [$this->config]);
-
-        $service->method('createOrder')->willReturnCallback(function ($userId, $amount, $extra) {
-            $order = new class($userId, $amount) {
-                public $userId;
-                public $amount;
-                public $status = 'pending';
-
-                public function __construct($userId, $amount) {
-                    $this->userId = $userId;
-                    $this->amount = $amount;
-                }
-
-                public function toArray() {
-                    return [
-                        'user_id' => $this->userId,
-                        'total_amount' => $this->amount,
-                        'status' => $this->status,
-                    ];
-                }
-            };
-            return $order;
-        });
-
-        $order = $service->createOrder(1001, 99.99);
-        $data = $order->toArray();
-
-        $this->assertEquals(1001, $data['user_id']);
-        $this->assertEquals(99.99, $data['total_amount']);
-        $this->assertEquals(OrderStatus::PENDING, $data['status']);
-    }
-
-    public function testCreateOrderWithInvalidAmount()
+    public function testCreateOrderValidation()
     {
         $service = new OrderService($this->config);
 
@@ -135,7 +101,7 @@ class OrderServiceTest extends TestCase
         $this->assertCount(11, $config['events']);
     }
 
-    public function testMarkExceptionWithDetailedError()
+    public function testMarkExceptionWithTerminalStatus()
     {
         $service = $this->getMockBuilder(OrderService::class)
             ->setConstructorArgs([$this->config])
@@ -157,19 +123,19 @@ class OrderServiceTest extends TestCase
     {
         $service = $this->getMockBuilder(OrderService::class)
             ->setConstructorArgs([$this->config])
-            ->onlyMethods(['getOrderById', 'validateEvent'])
+            ->onlyMethods(['getOrderById'])
             ->getMock();
 
         $mockOrder = $this->createMock(\Order\Models\Order::class);
         $mockOrder->method('getStatus')->willReturn(OrderStatus::PENDING);
-
-        $service->method('getOrderById')->willReturn($mockOrder);
-        $service->method('validateEvent')->willReturn([
+        $mockOrder->method('checkCan')->willReturn([
             'allowed' => false,
             'error_code' => 'invalid_transition',
             'error_message' => '当前状态 "待支付" 不支持 "发货" 操作',
             'suggestion' => '当前可执行操作: 支付、取消订单、标记异常',
         ]);
+
+        $service->method('getOrderById')->willReturn($mockOrder);
 
         $this->expectException(StateMachineException::class);
         $this->expectExceptionCode(StateMachineException::CODE_VALIDATION_FAILED);
@@ -202,5 +168,50 @@ class OrderServiceTest extends TestCase
         $this->assertTrue($results[OrderEvent::PAY]['allowed']);
         $this->assertFalse($results[OrderEvent::SHIP]['allowed']);
         $this->assertTrue($results[OrderEvent::CANCEL]['allowed']);
+    }
+
+    public function testGetOrderDetail()
+    {
+        $service = $this->getMockBuilder(OrderService::class)
+            ->setConstructorArgs([$this->config])
+            ->onlyMethods(['getOrderById', 'getOrderStatusLogs'])
+            ->getMock();
+
+        $mockOrder = $this->createMock(\Order\Models\Order::class);
+        $mockOrder->method('toArray')->willReturn([
+            'id' => 1,
+            'order_no' => 'ORD001',
+            'status' => 'pending',
+            'status_label' => '待支付',
+        ]);
+        $mockOrder->method('getStatusConsistencyCheck')->willReturn([
+            'db_status' => 'pending',
+            'memory_status' => 'pending',
+            'is_consistent' => true,
+        ]);
+
+        $service->method('getOrderById')->willReturn($mockOrder);
+        $service->method('getOrderStatusLogs')->willReturn([]);
+
+        $detail = $service->getOrderDetail(1);
+
+        $this->assertNotNull($detail);
+        $this->assertEquals('ORD001', $detail['order_no']);
+        $this->assertArrayHasKey('status_logs', $detail);
+        $this->assertArrayHasKey('consistency_check', $detail);
+        $this->assertTrue($detail['consistency_check']['is_consistent']);
+    }
+
+    public function testGetOrderDetailNotFound()
+    {
+        $service = $this->getMockBuilder(OrderService::class)
+            ->setConstructorArgs([$this->config])
+            ->onlyMethods(['getOrderById'])
+            ->getMock();
+
+        $service->method('getOrderById')->willReturn(null);
+
+        $detail = $service->getOrderDetail(999);
+        $this->assertNull($detail);
     }
 }

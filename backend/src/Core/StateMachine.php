@@ -96,7 +96,10 @@ class StateMachine
 
     public function checkCan(string $event, object $context = null): array
     {
-        if (!OrderEvent::exists($event)) {
+        $isKnownEvent = OrderEvent::exists($event);
+        $hasTransition = isset($this->transitions[$this->currentStatus . '.' . $event]);
+
+        if (!$isKnownEvent && !$hasTransition) {
             return [
                 'allowed' => false,
                 'error_code' => 'invalid_event',
@@ -259,7 +262,10 @@ class StateMachine
 
     public function apply(string $event, object $context = null, string $operatorId = '', string $remark = ''): TransitionResult
     {
-        if (!OrderEvent::exists($event)) {
+        $isKnownEvent = OrderEvent::exists($event);
+        $hasTransition = isset($this->transitions[$this->currentStatus . '.' . $event]);
+
+        if (!$isKnownEvent && !$hasTransition) {
             throw StateMachineException::invalidEvent($event);
         }
 

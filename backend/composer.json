@@ -12,8 +12,14 @@
     },
     "autoload": {
         "psr-4": {
-            "Order\\": "src/"
-        }
+            "Order\\": "src/",
+            "Dealer\\Wallet\\": "src/"
+        },
+        "files": [
+            "core/PermissionService.php",
+            "core/OrderNoGenerator.php",
+            "core/AuditService.php"
+        ]
     },
     "autoload-dev": {
         "psr-4": {

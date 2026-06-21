@@ -120,12 +120,14 @@ CREATE TABLE order_writeback_logs (
     FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='订单数据回写日志表';
 
-INSERT INTO orders (order_no, user_id, total_amount, status) VALUES
-('ORD2025010100001', 1001, 299.00, 'pending'),
-('ORD2025010100002', 1002, 599.00, 'paid'),
-('ORD2025010100003', 1003, 1299.00, 'shipped'),
-('ORD2025010100004', 1001, 899.00, 'delivered'),
-('ORD2025010100005', 1004, 199.00, 'exception');
+INSERT INTO orders (order_no, user_id, total_amount, status, audit_status, exception_type, exception_level, rollback_protected, rollback_count, writeback_status) VALUES
+('ORD2025010100001', 1001, 299.00, 'pending', 'none', NULL, 0, 0, 0, 'success'),
+('ORD2025010100002', 1002, 599.00, 'paid', 'approved', NULL, 0, 0, 0, 'success'),
+('ORD2025010100003', 1003, 1299.00, 'shipped', 'approved', NULL, 0, 1, 0, 'success'),
+('ORD2025010100004', 1001, 899.00, 'delivered', 'approved', NULL, 0, 1, 0, 'success'),
+('ORD2025010100005', 1004, 199.00, 'exception', 'pending', 'payment_abnormal', 2, 0, 0, 'failed'),
+('ORD2025010100006', 1005, 15999.00, 'paid', 'pending', NULL, 0, 1, 0, 'pending'),
+('ORD2025010100007', 1006, 2999.00, 'exception', 'pending', 'shipping_abnormal', 3, 0, 1, 'failed');
 
 INSERT INTO order_status_logs (order_id, from_status, to_status, event, message, operator_id, remark, context) VALUES
 (1, 'pending', 'pending', 'create', 'Order created', 'system', 'Initial order creation', '{}'),
@@ -136,4 +138,30 @@ INSERT INTO order_status_logs (order_id, from_status, to_status, event, message,
 (4, 'paid', 'shipped', 'ship', 'Order shipped', 'operator:admin01', 'Shipped via JD Logistics', '{"logistics_company":"JD","tracking_no":"JD9876543210"}'),
 (4, 'shipped', 'delivered', 'confirm_receipt', 'Delivery confirmed', 'user:1001', 'Received in good condition', '{}'),
 (5, 'pending', 'paid', 'pay', 'Payment successful', 'user:1004', 'Paid', '{}'),
-(5, 'paid', 'exception', 'mark_exception', 'Order marked as exception', 'operator:admin01', 'Payment exception detected, manual review required', '{"exception_type":"payment_abnormal","details":"Duplicate payment detected"}');
+(5, 'paid', 'exception', 'mark_exception', 'Order marked as exception', 'operator:admin01', 'Payment exception detected, manual review required', '{"exception_type":"payment_abnormal","details":"Duplicate payment detected"}'),
+(6, 'pending', 'paid', 'pay', 'Payment successful', 'user:1005', 'Paid via bank transfer', '{"payment_method":"bank_transfer","amount":15999.00}'),
+(7, 'pending', 'paid', 'pay', 'Payment successful', 'user:1006', 'Paid', '{}'),
+(7, 'paid', 'shipped', 'ship', 'Order shipped', 'operator:admin01', 'Shipped', '{}'),
+(7, 'shipped', 'paid', 'rollback', 'Rolled back from shipped to paid', 'operator:admin02', 'Rollback: Wrong shipping address', '{}'),
+(7, 'paid', 'exception', 'mark_exception', 'Order marked as exception', 'operator:admin01', 'Shipping address invalid, manual review required', '{"exception_type":"shipping_abnormal","details":"Invalid shipping address"}');
+
+INSERT INTO order_audit_records (order_id, audit_type, action, before_status, after_status, applicant_id, auditor_id, audit_remark, reason, context, audit_status, submitted_at, audited_at) VALUES
+(2, 'status_change', 'approve', 'pending', 'paid', 'user:1002', 'operator:admin01', 'Payment verified', 'Normal payment process', '{"payment_method":"alipay"}', 'approved', '2025-01-01 10:05:00', '2025-01-01 10:06:00'),
+(3, 'status_change', 'approve', 'paid', 'shipped', 'operator:admin01', 'operator:admin02', 'Inventory confirmed', 'Ready to ship', '{"logistics_company":"SF"}', 'approved', '2025-01-01 11:00:00', '2025-01-01 11:05:00'),
+(5, 'exception_resolve', 'submit', 'exception', NULL, 'operator:admin01', NULL, NULL, 'Duplicate payment detected, need manual review', '{"exception_type":"payment_abnormal"}', 'pending', '2025-01-01 14:30:00', NULL),
+(6, 'rollback', 'submit', 'paid', NULL, 'operator:admin03', NULL, NULL, 'Large amount order, need review before rollback', '{"amount":15999.00}', 'pending', '2025-01-01 15:00:00', NULL),
+(7, 'rollback', 'approve', 'shipped', 'paid', 'operator:admin01', 'operator:admin02', 'Wrong address confirmed', 'Shipping address invalid', '{}', 'approved', '2025-01-01 16:00:00', '2025-01-01 16:10:00');
+
+INSERT INTO order_rollback_protections (order_id, protection_type, protected_by, protection_reason, threshold_amount, protect_until, is_active, context) VALUES
+(3, 'amount_threshold', 'system', 'Order amount exceeds threshold', 1000.00, NULL, 1, '{"threshold":1000.00}'),
+(4, 'terminal_status', 'system', 'Delivered order protection', NULL, NULL, 1, '{}'),
+(6, 'amount_threshold', 'system', 'Large amount order protection', 10000.00, '2025-01-08 00:00:00', 1, '{"threshold":10000.00}');
+
+INSERT INTO order_writeback_logs (order_id, target_system, writeback_type, writeback_data, writeback_status, retry_count, max_retry_count, error_message, operator_id, last_attempt_at, completed_at) VALUES
+(1, 'erp', 'status_create', '{"order_no":"ORD2025010100001","status":"pending"}', 'success', 0, 3, NULL, 'system', '2025-01-01 10:00:00', '2025-01-01 10:00:01'),
+(2, 'erp', 'status_update', '{"order_no":"ORD2025010100002","status":"paid"}', 'success', 0, 3, NULL, 'system', '2025-01-01 10:05:00', '2025-01-01 10:05:02'),
+(2, 'finance', 'payment', '{"order_no":"ORD2025010100002","amount":599.00}', 'success', 0, 3, NULL, 'system', '2025-01-01 10:05:00', '2025-01-01 10:05:03'),
+(5, 'erp', 'status_update', '{"order_no":"ORD2025010100005","status":"exception"}', 'failed', 2, 3, 'ERP system timeout', 'system', '2025-01-01 14:35:00', NULL),
+(5, 'finance', 'payment', '{"order_no":"ORD2025010100005","amount":199.00,"exception":true}', 'failed', 1, 3, 'Finance API error: duplicate transaction', 'system', '2025-01-01 14:32:00', NULL),
+(6, 'erp', 'status_update', '{"order_no":"ORD2025010100006","status":"paid"}', 'pending', 0, 3, NULL, 'system', NULL, NULL),
+(7, 'wms', 'shipment', '{"order_no":"ORD2025010100007","action":"cancel_shipment"}', 'failed', 3, 3, 'WMS order already processed', 'operator:admin02', '2025-01-01 16:15:00', NULL);
