@@ -104,4 +104,102 @@ export const orderApi = {
   async checkConsistency(orderId) {
     return this.request('check_consistency', { order_id: orderId })
   },
+
+  async listExceptionOrders(params = {}) {
+    return this.request('list_exception', params)
+  },
+
+  async listPendingAuditOrders(params = {}) {
+    return this.request('list_pending_audit', params)
+  },
+
+  async listRollbackProtectedOrders(params = {}) {
+    return this.request('list_rollback_protected', params)
+  },
+
+  async listWritebackFailedOrders(params = {}) {
+    return this.request('list_writeback_failed', params)
+  },
+
+  async getOrderDetailFull(orderId) {
+    return this.request('detail_full', { order_id: orderId })
+  },
+
+  async submitRollbackAudit(orderId, reason, context = {}) {
+    return this.request('submit_rollback_audit', {
+      order_id: orderId,
+      applicant_id: 'current_user',
+      reason,
+      context,
+    })
+  },
+
+  async approveRollback(orderId, auditRemark = '', remark = '') {
+    return this.request('approve_rollback', {
+      order_id: orderId,
+      auditor_id: 'current_user',
+      audit_remark: auditRemark,
+      remark,
+    })
+  },
+
+  async rejectRollback(orderId, auditRemark) {
+    return this.request('reject_rollback', {
+      order_id: orderId,
+      auditor_id: 'current_user',
+      audit_remark: auditRemark,
+    })
+  },
+
+  async setRollbackProtection(orderId, protectionType, protectionReason, options = {}) {
+    return this.request('set_rollback_protection', {
+      order_id: orderId,
+      protection_type: protectionType,
+      protected_by: 'current_user',
+      protection_reason: protectionReason,
+      ...options,
+    })
+  },
+
+  async removeRollbackProtection(orderId) {
+    return this.request('remove_rollback_protection', {
+      order_id: orderId,
+      operator_id: 'current_user',
+    })
+  },
+
+  async getRollbackProtections(orderId) {
+    return this.request('get_rollback_protections', { order_id: orderId })
+  },
+
+  async getAuditRecords(orderId) {
+    return this.request('get_audit_records', { order_id: orderId })
+  },
+
+  async getAuditList(params = {}) {
+    return this.request('get_audit_list', params)
+  },
+
+  async getWritebackLogs(orderId) {
+    return this.request('get_writeback_logs', { order_id: orderId })
+  },
+
+  async retryWriteback(logId) {
+    return this.request('retry_writeback', {
+      log_id: logId,
+      operator_id: 'current_user',
+    })
+  },
+
+  async getExceptionStatistics() {
+    return this.request('exception_statistics')
+  },
+
+  async getAuditStatistics() {
+    return this.request('audit_statistics')
+  },
+
+  async getWritebackStatistics() {
+    return this.request('writeback_statistics')
+  },
 }

@@ -262,7 +262,7 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted, watch } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage, ElMessageBox, ElNotification } from 'element-plus'
 import { Right } from '@element-plus/icons-vue'
 
 const props = defineProps({
@@ -456,11 +456,41 @@ const validateBeforeAction = async (event) => {
   }
 }
 
+const getEventLabel = (event) => {
+  const labelMap = {
+    pay: '支付',
+    ship: '发货',
+    confirm_receipt: '确认收货',
+    complete: '完成',
+    cancel: '取消',
+    apply_refund: '申请退款',
+    approve_refund: '同意退款',
+    reject_refund: '拒绝退款',
+    mark_exception: '标记异常',
+    resolve_exception: '解决异常',
+    rollback: '回滚',
+  }
+  return labelMap[event] || event
+}
+
+const clearFailure = () => {
+  failureInfo.value = null
+}
+
+const retryFailedAction = () => {
+  if (failureInfo.value && failureInfo.value.event) {
+    const event = failureInfo.value.event
+    failureInfo.value = null
+    executeAction(event)
+  }
+}
+
 const executeAction = async (event) => {
   const valid = await validateBeforeAction(event)
   if (!valid) return
 
   loading.value = event
+  failureInfo.value = null
   try {
     const result = await apiRequest('apply_event', {
       order_id: props.orderId,
@@ -469,20 +499,67 @@ const executeAction = async (event) => {
     })
     if (result.code === 0) {
       ElMessage.success(result.message || '操作成功')
+      failureInfo.value = null
       await loadOrderDetail()
       emit('status-changed', result.data)
     } else {
-      ElMessage.error(result.message)
+      const errors = result.errors || {}
+      const data = result.data || {}
+      const rollbackAvailable = !!(errors.rollback_available || data.can_rollback || (order.value && order.value.can_rollback))
+      const retryable = !!errors.retryable
+
+      failureInfo.value = {
+        event: event,
+        eventLabel: getEventLabel(event),
+        message: result.message || '操作失败',
+        error_code: result.error_code || errors.error_code || 'UNKNOWN',
+        suggestion: errors.suggestion || '',
+        retryable: retryable,
+        rollbackAvailable: rollbackAvailable,
+      }
+
+      if (rollbackAvailable) {
+        ElNotification({
+          title: '操作失败',
+          message: `${result.message}，可尝试回滚到上一状态或重试操作`,
+          type: 'error',
+          duration: 0,
+        })
+      } else if (retryable) {
+        ElNotification({
+          title: '操作失败',
+          message: `${result.message}，可点击重试按钮重新执行`,
+          type: 'error',
+          duration: 0,
+        })
+      } else {
+        ElMessage.error(result.message)
+      }
+
       if (result.errors) {
         lastValidationError.value = {
           message: result.message,
-          error_code: result.errors.error_code,
-          suggestion: result.errors.suggestion,
+          error_code: errors.error_code || result.error_code || 'UNKNOWN',
+          suggestion: errors.suggestion || '',
         }
       }
     }
   } catch (e) {
-    ElMessage.error('操作失败')
+    failureInfo.value = {
+      event: event,
+      eventLabel: getEventLabel(event),
+      message: '网络错误，请稍后重试',
+      error_code: 'NETWORK_ERROR',
+      suggestion: '请检查网络连接后重试操作',
+      retryable: true,
+      rollbackAvailable: !!(order.value && order.value.can_rollback),
+    }
+    ElNotification({
+      title: '网络错误',
+      message: '操作提交失败，请检查网络后重试',
+      type: 'error',
+      duration: 0,
+    })
     emit('error', e)
   } finally {
     loading.value = ''
@@ -508,6 +585,7 @@ const executeRollback = async () => {
     })
     if (result.code === 0) {
       ElMessage.success('回滚成功')
+      failureInfo.value = null
       await loadOrderDetail()
       emit('status-changed', result.data)
     } else {
@@ -673,6 +751,22 @@ defineExpose({
 
 .validation-preview {
   margin-top: 16px;
+}
+
+.failure-alert {
+  margin-top: 16px;
+}
+
+.failure-suggestion {
+  color: #e6a23c;
+  margin-top: 4px;
+  font-weight: 500;
+}
+
+.failure-actions {
+  margin-top: 12px;
+  display: flex;
+  gap: 8px;
 }
 
 .history-section {

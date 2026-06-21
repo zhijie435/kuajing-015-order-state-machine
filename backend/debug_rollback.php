@@ -33,10 +33,10 @@ require_once BASE_PATH . '/src/Service/WalletService.php';
 
 require_once BASE_PATH . '/core/PermissionService.php';
 require_once BASE_PATH . '/core/OrderNoGenerator.php';
-require_once BASE_PATH . '/core/AuditService.php';
-require_once BASE_PATH . '/core/WarehouseRouter.php';
-require_once BASE_PATH . '/core/OrderService.php';
-require_once BASE_PATH . '/core/FulfillmentCallbackService.php';
+// require_once BASE_PATH . '/core/AuditService.php';
+// require_once BASE_PATH . '/core/WarehouseRouter.php';
+// require_once BASE_PATH . '/core/OrderService.php';
+// require_once BASE_PATH . '/core/FulfillmentCallbackService.php';
 
 use Dealer\Wallet\Service\WalletService;
 use Dealer\Wallet\Enum\WalletStatus;
