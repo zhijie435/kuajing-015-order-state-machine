@@ -25,8 +25,18 @@ class OrderController
                     return $this->create($params);
                 case 'list':
                     return $this->list($params);
+                case 'list_exception':
+                    return $this->listException($params);
+                case 'list_pending_audit':
+                    return $this->listPendingAudit($params);
+                case 'list_rollback_protected':
+                    return $this->listRollbackProtected($params);
+                case 'list_writeback_failed':
+                    return $this->listWritebackFailed($params);
                 case 'detail':
                     return $this->detail($params);
+                case 'detail_full':
+                    return $this->detailFull($params);
                 case 'validate':
                     return $this->validate($params);
                 case 'apply_event':
@@ -53,17 +63,43 @@ class OrderController
                     return $this->resolveException($params);
                 case 'rollback':
                     return $this->rollback($params);
+                case 'submit_rollback_audit':
+                    return $this->submitRollbackAudit($params);
+                case 'approve_rollback':
+                    return $this->approveRollback($params);
+                case 'reject_rollback':
+                    return $this->rejectRollback($params);
+                case 'set_rollback_protection':
+                    return $this->setRollbackProtection($params);
+                case 'remove_rollback_protection':
+                    return $this->removeRollbackProtection($params);
+                case 'get_rollback_protections':
+                    return $this->getRollbackProtections($params);
+                case 'get_audit_records':
+                    return $this->getAuditRecords($params);
+                case 'get_audit_list':
+                    return $this->getAuditList($params);
+                case 'get_writeback_logs':
+                    return $this->getWritebackLogs($params);
+                case 'retry_writeback':
+                    return $this->retryWriteback($params);
                 case 'status_logs':
                     return $this->statusLogs($params);
                 case 'state_machine_config':
                     return $this->stateMachineConfig();
                 case 'check_consistency':
                     return $this->checkConsistency($params);
+                case 'exception_statistics':
+                    return $this->exceptionStatistics();
+                case 'audit_statistics':
+                    return $this->auditStatistics();
+                case 'writeback_statistics':
+                    return $this->writebackStatistics();
                 default:
                     return ApiResponse::error('Invalid action', 40001);
             }
         } catch (StateMachineException $e) {
-            return ApiResponse::fromStateMachineException($e);
+            return ApiResponse::fromStateMachineException($e, $this->buildExceptionContext($params));
         } catch (\Exception $e) {
             return ApiResponse::error($e->getMessage(), 50000);
         }
@@ -339,5 +375,354 @@ class OrderController
         $result = $this->orderService->checkStatusConsistency($orderId);
 
         return ApiResponse::success($result, $result['is_consistent'] ? '状态一致' : '状态不一致');
+    }
+
+    private function listException(array $params): array
+    {
+        $page = (int) ($params['page'] ?? 1);
+        $pageSize = (int) ($params['page_size'] ?? 20);
+
+        if ($page < 1) {
+            $page = 1;
+        }
+        if ($pageSize < 1 || $pageSize > 100) {
+            $pageSize = 20;
+        }
+
+        $filters = [];
+        if (!empty($params['exception_type'])) {
+            $filters['exception_type'] = $params['exception_type'];
+        }
+        if (isset($params['exception_level']) && $params['exception_level'] !== '') {
+            $filters['exception_level'] = (int) $params['exception_level'];
+        }
+        if (!empty($params['keyword'])) {
+            $filters['keyword'] = $params['keyword'];
+        }
+
+        $result = $this->orderService->listExceptionOrders($page, $pageSize, $filters);
+
+        return ApiResponse::success($result);
+    }
+
+    private function listPendingAudit(array $params): array
+    {
+        $page = (int) ($params['page'] ?? 1);
+        $pageSize = (int) ($params['page_size'] ?? 20);
+
+        if ($page < 1) {
+            $page = 1;
+        }
+        if ($pageSize < 1 || $pageSize > 100) {
+            $pageSize = 20;
+        }
+
+        $result = $this->orderService->listPendingAuditOrders($page, $pageSize);
+
+        return ApiResponse::success($result);
+    }
+
+    private function listRollbackProtected(array $params): array
+    {
+        $page = (int) ($params['page'] ?? 1);
+        $pageSize = (int) ($params['page_size'] ?? 20);
+
+        if ($page < 1) {
+            $page = 1;
+        }
+        if ($pageSize < 1 || $pageSize > 100) {
+            $pageSize = 20;
+        }
+
+        $result = $this->orderService->listRollbackProtectedOrders($page, $pageSize);
+
+        return ApiResponse::success($result);
+    }
+
+    private function listWritebackFailed(array $params): array
+    {
+        $page = (int) ($params['page'] ?? 1);
+        $pageSize = (int) ($params['page_size'] ?? 20);
+
+        if ($page < 1) {
+            $page = 1;
+        }
+        if ($pageSize < 1 || $pageSize > 100) {
+            $pageSize = 20;
+        }
+
+        $result = $this->orderService->listWritebackFailedOrders($page, $pageSize);
+
+        return ApiResponse::success($result);
+    }
+
+    private function detailFull(array $params): array
+    {
+        $orderId = (int) ($params['order_id'] ?? 0);
+
+        if ($orderId <= 0) {
+            return ApiResponse::error('订单ID不能为空', 40004);
+        }
+
+        $detail = $this->orderService->getOrderDetailFull($orderId);
+
+        if ($detail === null) {
+            return ApiResponse::error('订单不存在', 40401);
+        }
+
+        return ApiResponse::success($detail);
+    }
+
+    private function submitRollbackAudit(array $params): array
+    {
+        $orderId = (int) ($params['order_id'] ?? 0);
+        $applicantId = $params['applicant_id'] ?? '';
+        $reason = $params['reason'] ?? '';
+
+        if ($orderId <= 0) {
+            return ApiResponse::error('订单ID不能为空', 40004);
+        }
+
+        if (empty($reason)) {
+            return ApiResponse::error('申请原因不能为空', 40009);
+        }
+
+        $context = $params['context'] ?? [];
+        if (is_string($context)) {
+            $context = json_decode($context, true) ?: [];
+        }
+
+        $auditRecord = $this->orderService->submitRollbackAudit($orderId, $applicantId, $reason, $context);
+
+        return ApiResponse::success([
+            'audit_record' => $auditRecord->toArray(),
+            'order' => $this->orderService->getOrderById($orderId)?->toArray(),
+        ], '回滚审核申请已提交');
+    }
+
+    private function approveRollback(array $params): array
+    {
+        $orderId = (int) ($params['order_id'] ?? 0);
+        $auditorId = $params['auditor_id'] ?? '';
+        $auditRemark = $params['audit_remark'] ?? '';
+        $remark = $params['remark'] ?? '';
+
+        if ($orderId <= 0) {
+            return ApiResponse::error('订单ID不能为空', 40004);
+        }
+
+        $result = $this->orderService->approveRollback($orderId, $auditorId, $auditRemark, $remark);
+
+        return ApiResponse::success([
+            'transition' => $result->toArray(),
+            'order' => $this->orderService->getOrderById($orderId)?->toArray(),
+        ], '回滚审核通过，状态已回滚');
+    }
+
+    private function rejectRollback(array $params): array
+    {
+        $orderId = (int) ($params['order_id'] ?? 0);
+        $auditorId = $params['auditor_id'] ?? '';
+        $auditRemark = $params['audit_remark'] ?? '';
+
+        if ($orderId <= 0) {
+            return ApiResponse::error('订单ID不能为空', 40004);
+        }
+
+        if (empty($auditRemark)) {
+            return ApiResponse::error('拒绝原因不能为空', 40010);
+        }
+
+        $auditRecord = $this->orderService->rejectRollback($orderId, $auditorId, $auditRemark);
+
+        return ApiResponse::success([
+            'audit_record' => $auditRecord->toArray(),
+            'order' => $this->orderService->getOrderById($orderId)?->toArray(),
+        ], '回滚审核已拒绝');
+    }
+
+    private function setRollbackProtection(array $params): array
+    {
+        $orderId = (int) ($params['order_id'] ?? 0);
+        $protectionType = $params['protection_type'] ?? '';
+        $protectedBy = $params['protected_by'] ?? '';
+        $protectionReason = $params['protection_reason'] ?? '';
+        $thresholdAmount = isset($params['threshold_amount']) ? (float) $params['threshold_amount'] : null;
+        $protectUntil = $params['protect_until'] ?? null;
+
+        if ($orderId <= 0) {
+            return ApiResponse::error('订单ID不能为空', 40004);
+        }
+
+        if (empty($protectionType)) {
+            return ApiResponse::error('保护类型不能为空', 40011);
+        }
+
+        if (empty($protectionReason)) {
+            return ApiResponse::error('保护原因不能为空', 40012);
+        }
+
+        $context = $params['context'] ?? [];
+        if (is_string($context)) {
+            $context = json_decode($context, true) ?: [];
+        }
+
+        $protection = $this->orderService->setRollbackProtection(
+            $orderId,
+            $protectionType,
+            $protectedBy,
+            $protectionReason,
+            $thresholdAmount,
+            $protectUntil,
+            $context
+        );
+
+        return ApiResponse::success([
+            'protection' => $protection->toArray(),
+            'order' => $this->orderService->getOrderById($orderId)?->toArray(),
+        ], '回滚保护设置成功');
+    }
+
+    private function removeRollbackProtection(array $params): array
+    {
+        $orderId = (int) ($params['order_id'] ?? 0);
+        $operatorId = $params['operator_id'] ?? '';
+
+        if ($orderId <= 0) {
+            return ApiResponse::error('订单ID不能为空', 40004);
+        }
+
+        $count = $this->orderService->removeRollbackProtection($orderId, $operatorId);
+
+        return ApiResponse::success([
+            'removed_count' => $count,
+            'order' => $this->orderService->getOrderById($orderId)?->toArray(),
+        ], '回滚保护已解除');
+    }
+
+    private function getRollbackProtections(array $params): array
+    {
+        $orderId = (int) ($params['order_id'] ?? 0);
+
+        if ($orderId <= 0) {
+            return ApiResponse::error('订单ID不能为空', 40004);
+        }
+
+        $protections = $this->orderService->getRollbackProtections($orderId);
+
+        return ApiResponse::success([
+            'order_id' => $orderId,
+            'protections' => $protections,
+        ]);
+    }
+
+    private function getAuditRecords(array $params): array
+    {
+        $orderId = (int) ($params['order_id'] ?? 0);
+
+        if ($orderId <= 0) {
+            return ApiResponse::error('订单ID不能为空', 40004);
+        }
+
+        $records = $this->orderService->getAuditRecords($orderId);
+
+        return ApiResponse::success([
+            'order_id' => $orderId,
+            'audit_records' => $records,
+        ]);
+    }
+
+    private function getAuditList(array $params): array
+    {
+        $page = (int) ($params['page'] ?? 1);
+        $pageSize = (int) ($params['page_size'] ?? 20);
+        $auditType = $params['audit_type'] ?? '';
+
+        if ($page < 1) {
+            $page = 1;
+        }
+        if ($pageSize < 1 || $pageSize > 100) {
+            $pageSize = 20;
+        }
+
+        $result = $this->orderService->getAuditList($auditType, $page, $pageSize);
+
+        return ApiResponse::success($result);
+    }
+
+    private function getWritebackLogs(array $params): array
+    {
+        $orderId = (int) ($params['order_id'] ?? 0);
+
+        if ($orderId <= 0) {
+            return ApiResponse::error('订单ID不能为空', 40004);
+        }
+
+        $logs = $this->orderService->getWritebackLogs($orderId);
+
+        return ApiResponse::success([
+            'order_id' => $orderId,
+            'writeback_logs' => $logs,
+        ]);
+    }
+
+    private function retryWriteback(array $params): array
+    {
+        $logId = (int) ($params['log_id'] ?? 0);
+        $operatorId = $params['operator_id'] ?? null;
+
+        if ($logId <= 0) {
+            return ApiResponse::error('回写记录ID不能为空', 40013);
+        }
+
+        $result = $this->orderService->retryWriteback($logId, $operatorId);
+
+        return ApiResponse::success([
+            'retry_success' => $result,
+        ], $result ? '回写重试已发起' : '回写重试失败');
+    }
+
+    private function exceptionStatistics(): array
+    {
+        $result = $this->orderService->getExceptionStatistics();
+
+        return ApiResponse::success($result);
+    }
+
+    private function auditStatistics(): array
+    {
+        $result = $this->orderService->getAuditStatistics();
+
+        return ApiResponse::success($result);
+    }
+
+    private function writebackStatistics(): array
+    {
+        $result = $this->orderService->getWritebackStatistics();
+
+        return ApiResponse::success($result);
+    }
+
+    private function buildExceptionContext(array $params): array
+    {
+        $orderId = (int) ($params['order_id'] ?? 0);
+        $context = [
+            'failed_event' => $params['event'] ?? null,
+        ];
+
+        if ($orderId > 0) {
+            try {
+                $order = $this->orderService->getOrderById($orderId);
+                if ($order !== null) {
+                    $context['order_id'] = $orderId;
+                    $context['current_status'] = $order->getStatus();
+                    $context['can_rollback'] = !empty($order->getRollbackStack());
+                    $context['rollback_depth'] = count($order->getRollbackStack());
+                }
+            } catch (\Exception $e) {
+            }
+        }
+
+        return $context;
     }
 }

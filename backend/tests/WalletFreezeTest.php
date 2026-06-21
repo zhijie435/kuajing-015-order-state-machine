@@ -291,9 +291,10 @@ class WalletFreezeTest extends TestCase
 
         $this->service->deductFrozen($f1['freeze_no'], 500.00, ['operator' => 'admin', 'reason' => 'penalty']);
         $wallet = $this->getWallet(114);
-        $this->assertEquals(WalletStatus::PARTIALLY_FROZEN, $wallet['status']);
+        $this->assertEquals(WalletStatus::FULLY_FROZEN, $wallet['status']);
         $this->assertEquals('2500.00', $wallet['balance']);
         $this->assertEquals('2500.00', $wallet['frozen_amount']);
+        $this->assertEquals('0.00', $wallet['available_amount']);
 
         $this->service->unfreeze($f2['freeze_no'], 800.00, ['operator' => 'admin', 'reason' => 'release']);
         $wallet = $this->getWallet(114);

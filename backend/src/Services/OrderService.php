@@ -424,4 +424,360 @@ class OrderService
 
         return $order->getStatusConsistencyCheck();
     }
+
+    public function listExceptionOrders(int $page = 1, int $pageSize = 20, array $filters = []): array
+    {
+        $filters['has_exception'] = true;
+        return $this->listOrders($page, $pageSize, '', 0, $filters);
+    }
+
+    public function listOrdersByAuditStatus(string $auditStatus, int $page = 1, int $pageSize = 20): array
+    {
+        $filters = ['audit_status' => $auditStatus];
+        return $this->listOrders($page, $pageSize, '', 0, $filters);
+    }
+
+    public function listPendingAuditOrders(int $page = 1, int $pageSize = 20): array
+    {
+        return $this->listOrdersByAuditStatus(\Order\Enums\AuditStatus::PENDING, $page, $pageSize);
+    }
+
+    public function listRollbackProtectedOrders(int $page = 1, int $pageSize = 20): array
+    {
+        $filters = ['rollback_protected' => true];
+        return $this->listOrders($page, $pageSize, '', 0, $filters);
+    }
+
+    public function listWritebackFailedOrders(int $page = 1, int $pageSize = 20): array
+    {
+        $filters = ['writeback_status' => \Order\Enums\WritebackStatus::FAILED];
+        return $this->listOrders($page, $pageSize, '', 0, $filters);
+    }
+
+    public function getExceptionStatistics(): array
+    {
+        $db = \Order\Core\Database::getInstance($this->config['db'] ?? []);
+
+        $sql = 'SELECT 
+            COUNT(*) as total,
+            SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) as exception_count,
+            SUM(CASE WHEN exception_level >= ? THEN 1 ELSE 0 END) as high_level_count,
+            exception_type,
+            COUNT(*) as type_count
+            FROM orders 
+            WHERE status = ? OR exception_level > 0
+            GROUP BY exception_type WITH ROLLUP';
+
+        $rows = $db->fetchAll($sql, [
+            \Order\Enums\OrderStatus::EXCEPTION,
+            \Order\Enums\ExceptionLevel::HIGH,
+            \Order\Enums\OrderStatus::EXCEPTION,
+        ]);
+
+        $total = 0;
+        $exceptionCount = 0;
+        $highLevelCount = 0;
+        $byType = [];
+
+        foreach ($rows as $row) {
+            if ($row['exception_type'] === null) {
+                $total = (int) $row['total'];
+                $exceptionCount = (int) $row['exception_count'];
+                $highLevelCount = (int) $row['high_level_count'];
+            } else {
+                $byType[] = [
+                    'type' => $row['exception_type'],
+                    'type_label' => \Order\Enums\ExceptionType::getLabel($row['exception_type']),
+                    'count' => (int) $row['type_count'],
+                ];
+            }
+        }
+
+        return [
+            'total' => $total,
+            'exception_status_count' => $exceptionCount,
+            'high_level_count' => $highLevelCount,
+            'by_type' => $byType,
+        ];
+    }
+
+    public function getAuditStatistics(): array
+    {
+        $db = \Order\Core\Database::getInstance($this->config['db'] ?? []);
+
+        $sql = 'SELECT audit_status, COUNT(*) as count FROM orders GROUP BY audit_status';
+        $rows = $db->fetchAll($sql);
+
+        $result = [
+            'total' => 0,
+            'by_status' => [],
+        ];
+
+        foreach ($rows as $row) {
+            $count = (int) $row['count'];
+            $result['total'] += $count;
+            $result['by_status'][] = [
+                'status' => $row['audit_status'],
+                'status_label' => \Order\Enums\AuditStatus::getLabel($row['audit_status']),
+                'count' => $count,
+            ];
+        }
+
+        return $result;
+    }
+
+    public function getWritebackStatistics(): array
+    {
+        $db = \Order\Core\Database::getInstance($this->config['db'] ?? []);
+
+        $sql = 'SELECT writeback_status, COUNT(*) as count FROM orders GROUP BY writeback_status';
+        $rows = $db->fetchAll($sql);
+
+        $result = [
+            'total' => 0,
+            'by_status' => [],
+            'failed_count' => 0,
+            'pending_count' => 0,
+        ];
+
+        foreach ($rows as $row) {
+            $count = (int) $row['count'];
+            $result['total'] += $count;
+            $result['by_status'][] = [
+                'status' => $row['writeback_status'],
+                'status_label' => \Order\Enums\WritebackStatus::getLabel($row['writeback_status']),
+                'count' => $count,
+            ];
+            if ($row['writeback_status'] === \Order\Enums\WritebackStatus::FAILED) {
+                $result['failed_count'] = $count;
+            }
+            if ($row['writeback_status'] === \Order\Enums\WritebackStatus::PENDING) {
+                $result['pending_count'] = $count;
+            }
+        }
+
+        return $result;
+    }
+
+    public function submitRollbackAudit(int $orderId, string $applicantId, string $reason, array $context = []): \Order\Models\OrderAuditRecord
+    {
+        $order = $this->getOrderById($orderId);
+        if ($order === null) {
+            throw StateMachineException::validationFailed('订单不存在');
+        }
+
+        if (!$order->requiresRollbackAudit()) {
+            throw StateMachineException::validationFailed('该订单无需审核即可回滚');
+        }
+
+        if (empty($reason)) {
+            throw StateMachineException::validationFailed('申请原因不能为空');
+        }
+
+        return $order->submitRollbackAudit($applicantId, $reason, $context);
+    }
+
+    public function approveRollback(int $orderId, string $auditorId, string $auditRemark = '', string $remark = ''): TransitionResult
+    {
+        $order = $this->getOrderById($orderId);
+        if ($order === null) {
+            throw StateMachineException::validationFailed('订单不存在');
+        }
+
+        return $order->approveRollback($auditorId, $auditRemark, $remark);
+    }
+
+    public function rejectRollback(int $orderId, string $auditorId, string $auditRemark = ''): \Order\Models\OrderAuditRecord
+    {
+        $order = $this->getOrderById($orderId);
+        if ($order === null) {
+            throw StateMachineException::validationFailed('订单不存在');
+        }
+
+        return $order->rejectRollback($auditorId, $auditRemark);
+    }
+
+    public function setRollbackProtection(
+        int $orderId,
+        string $protectionType,
+        string $protectedBy,
+        string $protectionReason,
+        ?float $thresholdAmount = null,
+        ?string $protectUntil = null,
+        array $context = []
+    ): \Order\Models\OrderRollbackProtection {
+        $order = $this->getOrderById($orderId);
+        if ($order === null) {
+            throw StateMachineException::validationFailed('订单不存在');
+        }
+
+        if (!\Order\Enums\RollbackProtectionType::exists($protectionType)) {
+            throw StateMachineException::validationFailed('无效的保护类型');
+        }
+
+        if (empty($protectionReason)) {
+            throw StateMachineException::validationFailed('保护原因不能为空');
+        }
+
+        return $order->setRollbackProtection(
+            $protectionType,
+            $protectedBy,
+            $protectionReason,
+            $thresholdAmount,
+            $protectUntil,
+            $context
+        );
+    }
+
+    public function removeRollbackProtection(int $orderId, string $operatorId = ''): int
+    {
+        $order = $this->getOrderById($orderId);
+        if ($order === null) {
+            throw StateMachineException::validationFailed('订单不存在');
+        }
+
+        return $order->removeRollbackProtection($operatorId);
+    }
+
+    public function getRollbackProtections(int $orderId): array
+    {
+        $order = $this->getOrderById($orderId);
+        if ($order === null) {
+            throw StateMachineException::validationFailed('订单不存在');
+        }
+
+        $protections = $order->getRollbackProtections();
+        return array_map(function ($p) {
+            return $p->toArray();
+        }, $protections);
+    }
+
+    public function getWritebackLogs(int $orderId): array
+    {
+        $order = $this->getOrderById($orderId);
+        if ($order === null) {
+            throw StateMachineException::validationFailed('订单不存在');
+        }
+
+        $logs = $order->getWritebackLogs();
+        return array_map(function ($log) {
+            return $log->toArray();
+        }, $logs);
+    }
+
+    public function getAuditRecords(int $orderId): array
+    {
+        $order = $this->getOrderById($orderId);
+        if ($order === null) {
+            throw StateMachineException::validationFailed('订单不存在');
+        }
+
+        $records = $order->getAuditRecords();
+        return array_map(function ($record) {
+            return $record->toArray();
+        }, $records);
+    }
+
+    public function retryWriteback(int $logId, string $operatorId = null): bool
+    {
+        $log = \Order\Models\OrderWritebackLog::findById($logId, $this->config);
+        if ($log === null) {
+            throw StateMachineException::validationFailed('回写记录不存在');
+        }
+
+        if (!$log->canRetry()) {
+            throw StateMachineException::validationFailed('该回写记录无法重试');
+        }
+
+        return $log->attemptRetry();
+    }
+
+    public function getOrderDetailFull(int $orderId): ?array
+    {
+        $order = $this->getOrderById($orderId);
+        if ($order === null) {
+            return null;
+        }
+
+        $detail = $order->toArray();
+        $detail['status_logs'] = $this->getOrderStatusLogs($orderId);
+        $detail['consistency_check'] = $order->getStatusConsistencyCheck();
+        $detail['audit_records'] = $this->getAuditRecords($orderId);
+        $detail['rollback_protections'] = $this->getRollbackProtections($orderId);
+        $detail['writeback_logs'] = $this->getWritebackLogs($orderId);
+
+        return $detail;
+    }
+
+    public function getAuditList(string $auditType, int $page = 1, int $pageSize = 20): array
+    {
+        $db = \Order\Core\Database::getInstance($this->config['db'] ?? []);
+        $offset = ($page - 1) * $pageSize;
+
+        $where = ['ar.audit_status = ?'];
+        $params = [\Order\Enums\AuditStatus::PENDING];
+
+        if (!empty($auditType)) {
+            $where[] = 'ar.audit_type = ?';
+            $params[] = $auditType;
+        }
+
+        $whereSql = implode(' AND ', $where);
+
+        $countSql = "SELECT COUNT(*) as total FROM order_audit_records ar WHERE {$whereSql}";
+        $countRow = $db->fetchOne($countSql, $params);
+        $total = (int) ($countRow['total'] ?? 0);
+
+        $sql = "SELECT ar.*, o.order_no, o.total_amount, o.status as order_status
+                FROM order_audit_records ar
+                LEFT JOIN orders o ON ar.order_id = o.id
+                WHERE {$whereSql}
+                ORDER BY ar.id DESC
+                LIMIT {$offset}, {$pageSize}";
+        $rows = $db->fetchAll($sql, $params);
+
+        $records = [];
+        foreach ($rows as $row) {
+            $record = \Order\Models\OrderAuditRecord::findById($row['id'], $this->config);
+            if ($record !== null) {
+                $recordArr = $record->toArray();
+                $recordArr['order_no'] = $row['order_no'];
+                $recordArr['order_total_amount'] = (float) $row['total_amount'];
+                $recordArr['order_status'] = $row['order_status'];
+                $recordArr['order_status_label'] = \Order\Enums\OrderStatus::getLabel($row['order_status']);
+                $records[] = $recordArr;
+            }
+        }
+
+        return [
+            'total' => $total,
+            'page' => $page,
+            'page_size' => $pageSize,
+            'total_pages' => (int) ceil($total / $pageSize),
+            'items' => $records,
+        ];
+    }
+
+    public function markExceptionWithType(
+        int $orderId,
+        string $reason,
+        string $operatorId = '',
+        string $exceptionType = \Order\Enums\ExceptionType::OTHER,
+        int $exceptionLevel = \Order\Enums\ExceptionLevel::MEDIUM
+    ): TransitionResult {
+        $order = $this->getOrderById($orderId);
+        if ($order === null) {
+            throw StateMachineException::validationFailed('订单不存在');
+        }
+
+        if (!\Order\Enums\ExceptionType::exists($exceptionType)) {
+            throw StateMachineException::validationFailed('无效的异常类型');
+        }
+
+        if (!\Order\Enums\ExceptionLevel::exists($exceptionLevel)) {
+            throw StateMachineException::validationFailed('无效的异常等级');
+        }
+
+        return $order->markException($reason, $operatorId, $exceptionType, $exceptionLevel);
+    }
 }

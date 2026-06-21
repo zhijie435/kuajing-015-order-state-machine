@@ -48,11 +48,22 @@ class WalletService
 
     public function listWallets(int $page = 1, int $pageSize = 20): array
     {
-        if (!PermissionService::isAdmin()) {
-            throw WalletPermissionException::forAdminRequired('查看钱包列表');
+        if (!PermissionService::hasPermission(PermissionService::PERM_WALLET_VIEW_ALL)) {
+            $currentDealerId = PermissionService::getCurrentDealerId();
+            if ($currentDealerId === null || !PermissionService::hasPermission(PermissionService::PERM_WALLET_VIEW_OWN)) {
+                throw WalletPermissionException::forOperationDenied('查看钱包列表', PermissionService::PERM_WALLET_VIEW_ALL);
+            }
+            $wallet = $this->walletRepository->findByDealerId($currentDealerId);
+            return [
+                'items' => $wallet ? [$wallet->toArray()] : [],
+                'total' => $wallet ? 1 : 0,
+                'page' => 1,
+                'page_size' => $pageSize,
+            ];
         }
+        $items = $this->walletRepository->findAll($page, $pageSize);
         return [
-            'items' => $this->walletRepository->findAll($page, $pageSize),
+            'items' => $items,
             'total' => $this->walletRepository->count(),
             'page' => $page,
             'page_size' => $pageSize,
@@ -67,7 +78,9 @@ class WalletService
             TransactionType::RECHARGE,
             true,
             $options,
-            ['dealer_id' => $dealerId, 'amount' => $amount, 'operation_name' => '钱包充值']
+            ['dealer_id' => $dealerId, 'amount' => $amount, 'operation_name' => '钱包充值'],
+            false,
+            PermissionService::PERM_WALLET_RECHARGE
         );
     }
 
@@ -80,7 +93,8 @@ class WalletService
             false,
             $options,
             ['dealer_id' => $dealerId, 'amount' => $amount, 'operation_name' => '余额提现'],
-            true
+            true,
+            PermissionService::PERM_WALLET_WITHDRAW
         );
     }
 
@@ -93,7 +107,8 @@ class WalletService
             false,
             $options,
             ['dealer_id' => $dealerId, 'amount' => $amount, 'operation_name' => '余额消费'],
-            true
+            true,
+            PermissionService::PERM_WALLET_CONSUME
         );
     }
 
@@ -105,7 +120,9 @@ class WalletService
             TransactionType::REFUND,
             true,
             $options,
-            ['dealer_id' => $dealerId, 'amount' => $amount, 'operation_name' => '消费退款']
+            ['dealer_id' => $dealerId, 'amount' => $amount, 'operation_name' => '消费退款'],
+            false,
+            PermissionService::PERM_WALLET_REFUND
         );
     }
 
@@ -113,7 +130,7 @@ class WalletService
     {
         return $this->executeTransaction(function () use ($dealerId, $amount, $options) {
             $this->validateAmount($amount);
-            $this->assertCanOperateWallet($dealerId, '资金冻结');
+            $this->assertCanOperateWallet($dealerId, '资金冻结', PermissionService::PERM_WALLET_FREEZE_ALL);
 
             $wallet = $this->getWalletForUpdate($dealerId);
             $this->assertSufficientAvailable($wallet, $amount, '冻结');
@@ -144,7 +161,7 @@ class WalletService
                 'remark' => ($options['reason'] ?? '') . ($transition['changed'] ? " | {$transition['message']}" : ''),
             ]);
 
-            $result = $this->refreshAndReturn($wallet);
+            $result = $this->refreshAndReturnWithSnapshots($wallet);
             $result['status_transition'] = $transition;
             $result['freeze_no'] = $freezeNo;
             return $result;
@@ -154,8 +171,8 @@ class WalletService
     public function unfreeze(string $freezeNo, float $amount = null, array $options = []): array
     {
         return $this->executeTransaction(function () use ($freezeNo, $amount, $options) {
-            $this->assertCanOperateWallet(0, '资金解冻');
             $record = $this->findFreezeRecordForUpdate($freezeNo, '解冻');
+            $this->assertCanOperateWallet($record->dealerId, '资金解冻', PermissionService::PERM_WALLET_UNFREEZE);
             $wallet = $this->getWalletForUpdate($record->dealerId);
 
             $remaining = $record->remainingAmount;
@@ -188,11 +205,12 @@ class WalletService
                 'remark' => ($options['reason'] ?? '') . ($transition['changed'] ? " | {$transition['message']}" : ''),
             ]);
 
-            $result = $this->refreshAndReturn($wallet);
+            $result = $this->refreshAndReturnWithSnapshots($wallet);
             $result['status_transition'] = $transition;
             $result['freeze_no'] = $freezeNo;
             $result['unfrozen_amount'] = number_format($unfreezeAmount, 2, '.', '');
             $result['remaining_amount'] = number_format($newRemaining, 2, '.', '');
+            $result['freeze_record_snapshot'] = $record->toArray();
             return $result;
         }, ['freeze_no' => $freezeNo, 'amount' => $amount, 'operation_name' => '资金解冻']);
     }
@@ -200,8 +218,8 @@ class WalletService
     public function deductFrozen(string $freezeNo, float $amount = null, array $options = []): array
     {
         return $this->executeTransaction(function () use ($freezeNo, $amount, $options) {
-            $this->assertCanOperateWallet(0, '冻结资金扣除');
             $record = $this->findFreezeRecordForUpdate($freezeNo, '扣除');
+            $this->assertCanOperateWallet($record->dealerId, '冻结资金扣除', PermissionService::PERM_WALLET_DEDUCT_FROZEN);
             $wallet = $this->getWalletForUpdate($record->dealerId);
 
             $remaining = $record->remainingAmount;
@@ -240,11 +258,12 @@ class WalletService
                 'remark' => ($options['reason'] ?? '') . ($transition['changed'] ? " | {$transition['message']}" : ''),
             ]);
 
-            $result = $this->refreshAndReturn($wallet);
+            $result = $this->refreshAndReturnWithSnapshots($wallet);
             $result['status_transition'] = $transition;
             $result['freeze_no'] = $freezeNo;
             $result['deducted_amount'] = number_format($deductAmount, 2, '.', '');
             $result['remaining_amount'] = number_format($newRemaining, 2, '.', '');
+            $result['freeze_record_snapshot'] = $record->toArray();
             return $result;
         }, ['freeze_no' => $freezeNo, 'amount' => $amount, 'operation_name' => '冻结资金扣除']);
     }
@@ -280,21 +299,19 @@ class WalletService
 
     public function reconcileFreezeRecords(int $dealerId): array
     {
-        $this->assertCanViewWallet($dealerId);
+        $this->assertCanOperateWallet($dealerId, '财务对账', PermissionService::PERM_WALLET_RECONCILE);
         return $this->reconciliationService->reconcileFreezeRecords($dealerId);
     }
 
     public function reconcileBalance(int $dealerId): array
     {
-        $this->assertCanViewWallet($dealerId);
+        $this->assertCanOperateWallet($dealerId, '财务对账', PermissionService::PERM_WALLET_RECONCILE);
         return $this->reconciliationService->reconcileBalance($dealerId);
     }
 
     public function fixWalletInconsistency(int $dealerId, string $operator = 'system'): array
     {
-        if (!PermissionService::hasPermission(PermissionService::PERM_WALLET_FIX)) {
-            throw WalletPermissionException::forScopeDenied('修复钱包异常数据', PermissionService::PERM_WALLET_FIX);
-        }
+        $this->assertCanOperateWallet($dealerId, '修复钱包异常数据', PermissionService::PERM_WALLET_FIX);
         return $this->reconciliationService->fixWalletInconsistency($dealerId, $operator);
     }
 
@@ -305,12 +322,13 @@ class WalletService
         bool $isIncrease,
         array $options,
         array $context,
-        bool $checkAvailable = false
+        bool $checkAvailable = false,
+        string $permission = ''
     ): array {
         $operationName = $context['operation_name'] ?? '余额变更';
-        return $this->executeTransaction(function () use ($dealerId, $amount, $txType, $isIncrease, $options, $checkAvailable, $operationName) {
+        return $this->executeTransaction(function () use ($dealerId, $amount, $txType, $isIncrease, $options, $checkAvailable, $operationName, $permission) {
             $this->validateAmount($amount);
-            $this->assertCanOperateWallet($dealerId, $operationName);
+            $this->assertCanOperateWallet($dealerId, $operationName, $permission);
 
             $wallet = $isIncrease
                 ? $this->getOrCreateWalletForUpdate($dealerId)
@@ -340,7 +358,7 @@ class WalletService
                 'related_no' => $options['related_no'] ?? '',
             ]);
 
-            $result = $this->refreshAndReturn($wallet);
+            $result = $this->refreshAndReturnWithSnapshots($wallet);
             $result['status_transition'] = $transition;
             return $result;
         }, $context);
@@ -368,21 +386,21 @@ class WalletService
             if ($currentDealerId !== null) {
                 throw WalletPermissionException::forDealerMismatch($dealerId, $currentDealerId);
             }
-            throw WalletPermissionException::forAdminRequired('查询钱包信息');
+            throw WalletPermissionException::forOperationDenied('查询钱包信息', PermissionService::PERM_WALLET_VIEW_ALL);
         }
     }
 
-    private function assertCanOperateWallet(int $dealerId, string $operationName): void
+    private function assertCanOperateWallet(int $dealerId, string $operationName, string $permission = ''): void
     {
-        if (PermissionService::isAdmin()) {
-            return;
-        }
-        if (!PermissionService::canViewWallet($dealerId)) {
+        if ($dealerId > 0 && !PermissionService::canViewWallet($dealerId)) {
             $currentDealerId = PermissionService::getCurrentDealerId();
             if ($currentDealerId !== null) {
                 throw WalletPermissionException::forDealerMismatch($dealerId, $currentDealerId);
             }
-            throw WalletPermissionException::forAdminRequired($operationName);
+            throw WalletPermissionException::forOperationDenied($operationName, $permission ?: PermissionService::PERM_WALLET_VIEW_ALL, $dealerId);
+        }
+        if ($permission !== '' && !PermissionService::hasPermission($permission)) {
+            throw WalletPermissionException::forOperationDenied($operationName, $permission, $dealerId);
         }
     }
 
@@ -393,7 +411,7 @@ class WalletService
         }
         $currentDealerId = PermissionService::getCurrentDealerId();
         if ($currentDealerId === null) {
-            throw WalletPermissionException::forAdminRequired('创建钱包');
+            throw WalletPermissionException::forOperationDenied('创建钱包', PermissionService::PERM_WALLET_RECHARGE);
         }
         if ($dealerId !== $currentDealerId) {
             throw WalletPermissionException::forDealerMismatch($dealerId, $currentDealerId);
@@ -645,10 +663,16 @@ class WalletService
         ]);
     }
 
-    private function refreshAndReturn(Wallet $wallet): array
+    private function refreshAndReturnWithSnapshots(Wallet $wallet): array
     {
         $this->refreshWallet($wallet);
-        return $wallet->toArray();
+        $result = $wallet->toArray();
+
+        $result['recent_transactions'] = $this->transactionRepository->findByWalletId($wallet->id, 1, 5);
+        $result['recent_freeze_records'] = $this->freezeRecordRepository->findByWalletId($wallet->id, null, 1, 5);
+        $result['snapshot_time'] = date('Y-m-d H:i:s');
+
+        return $result;
     }
 
     private function refreshWallet(Wallet $wallet): void
@@ -683,6 +707,7 @@ class WalletService
     {
         $wallet = $this->walletRepository->findByDealerIdForUpdate($dealerId);
         if (!$wallet) {
+            $this->assertCanCreateWallet($dealerId);
             $this->walletRepository->create($dealerId);
             $wallet = $this->walletRepository->findByDealerIdForUpdate($dealerId);
         }

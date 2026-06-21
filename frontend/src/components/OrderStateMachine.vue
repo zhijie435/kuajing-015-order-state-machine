@@ -140,6 +140,41 @@
           </template>
         </el-alert>
       </div>
+
+      <div class="failure-alert" v-if="failureInfo">
+        <el-alert
+          :title="'操作失败: ' + failureInfo.eventLabel"
+          type="error"
+          show-icon
+          :closable="true"
+          @close="clearFailure"
+        >
+          <template #default>
+            <p>{{ failureInfo.message }}</p>
+            <p v-if="failureInfo.suggestion" class="failure-suggestion">{{ failureInfo.suggestion }}</p>
+            <div class="failure-actions">
+              <el-button
+                v-if="failureInfo.retryable"
+                type="primary"
+                size="small"
+                @click="retryFailedAction"
+                :loading="loading === failureInfo.event"
+              >
+                重试操作
+              </el-button>
+              <el-button
+                v-if="failureInfo.rollbackAvailable"
+                type="warning"
+                size="small"
+                @click="executeRollback"
+                :loading="loading === 'rollback'"
+              >
+                回滚到上一状态
+              </el-button>
+            </div>
+          </template>
+        </el-alert>
+      </div>
     </div>
 
     <div class="history-section">
@@ -251,6 +286,7 @@ const showResolveDialog = ref(false)
 const lastValidationError = ref(null)
 const consistencyCheck = ref(null)
 const stateMachineConfig = ref(null)
+const failureInfo = ref(null)
 
 const exceptionForm = reactive({
   reason: '',
