@@ -21,6 +21,7 @@ class Order
     private ?string $createdAt;
     private ?string $updatedAt;
     private array $extraData = [];
+    private bool $isDirty = false;
 
     public function __construct(
         string $orderNo,
@@ -90,6 +91,7 @@ class Order
     public function setExtraData(string $key, $value): void
     {
         $this->extraData[$key] = $value;
+        $this->isDirty = true;
     }
 
     public function getExtraData(string $key = null)
@@ -100,18 +102,53 @@ class Order
         return $this->extraData[$key] ?? null;
     }
 
+    public function setTotalAmount(float $amount): void
+    {
+        $this->totalAmount = $amount;
+        $this->isDirty = true;
+    }
+
     public function can(string $event): bool
     {
         return $this->stateMachine->can($event, $this);
     }
 
+    public function checkCan(string $event): array
+    {
+        return $this->stateMachine->checkCan($event, $this);
+    }
+
+    public function getValidationErrors(string $event): array
+    {
+        return $this->stateMachine->getValidationErrors($event, $this);
+    }
+
+    public function validateAndApply(string $event, string $operatorId = '', string $remark = ''): TransitionResult
+    {
+        $validationResult = $this->checkCan($event);
+        if (!$validationResult['allowed']) {
+            throw StateMachineException::validationFailed(
+                $validationResult['error_message'] . ' ' . ($validationResult['suggestion'] ?? '')
+            );
+        }
+
+        return $this->apply($event, $operatorId, $remark);
+    }
+
     public function apply(string $event, string $operatorId = '', string $remark = ''): TransitionResult
     {
+        $validationResult = $this->checkCan($event);
+        if (!$validationResult['allowed']) {
+            throw StateMachineException::invalidTransition($this->getStatus(), $event);
+        }
+
         return $this->db->transactional(function () use ($event, $operatorId, $remark) {
             $result = $this->stateMachine->apply($event, $this, $operatorId, $remark);
 
+            $this->persistStateSnapshot();
             $this->updateStatus($result->getToStatus(), $operatorId, $remark);
             $this->logTransition($result);
+            $this->save();
 
             return $result;
         });
@@ -122,8 +159,10 @@ class Order
         return $this->db->transactional(function () use ($reason, $operatorId, $remark) {
             $result = $this->stateMachine->apply(OrderEvent::MARK_EXCEPTION, $this, $operatorId, $reason);
 
+            $this->persistStateSnapshot();
             $this->updateStatus($result->getToStatus(), $operatorId, $reason);
             $this->logTransition($result);
+            $this->save();
 
             return $result;
         });
@@ -134,8 +173,10 @@ class Order
         return $this->db->transactional(function () use ($targetStatus, $operatorId, $remark) {
             $result = $this->stateMachine->resolveException($targetStatus, $this, $operatorId, $remark);
 
+            $this->persistStateSnapshot();
             $this->updateStatus($result->getToStatus(), $operatorId, $remark);
             $this->logTransition($result);
+            $this->save();
 
             return $result;
         });
@@ -146,8 +187,10 @@ class Order
         return $this->db->transactional(function () use ($operatorId, $remark) {
             $result = $this->stateMachine->rollback($this, $operatorId, $remark);
 
+            $this->persistStateSnapshot();
             $this->updateStatus($result->getToStatus(), $operatorId, $remark);
             $this->logTransition($result);
+            $this->save();
 
             return $result;
         });
@@ -158,13 +201,13 @@ class Order
         return $this->stateMachine->getAvailableEvents();
     }
 
-    public function getTransitionHistory(): array
+    public function getTransitionHistory(int $limit = 50): array
     {
         if ($this->id === null) {
             return [];
         }
 
-        $sql = 'SELECT * FROM order_status_logs WHERE order_id = ? ORDER BY id DESC';
+        $sql = 'SELECT * FROM order_status_logs WHERE order_id = ? ORDER BY id DESC LIMIT ' . (int) $limit;
         return $this->db->fetchAll($sql, [$this->id]);
     }
 
@@ -173,16 +216,66 @@ class Order
         return $this->stateMachine->getRollbackStack();
     }
 
+    private function persistStateSnapshot(): void
+    {
+        $snapshot = $this->stateMachine->getSnapshot();
+        $this->extraData['_state_snapshot'] = $snapshot;
+        $this->isDirty = true;
+    }
+
+    private function restoreStateSnapshot(): void
+    {
+        if (isset($this->extraData['_state_snapshot']) && is_array($this->extraData['_state_snapshot'])) {
+            $this->stateMachine->restoreFromSnapshot($this->extraData['_state_snapshot']);
+            $this->isDirty = false;
+        }
+    }
+
+    public function refresh(): void
+    {
+        if ($this->id === null) {
+            return;
+        }
+
+        $sql = 'SELECT * FROM orders WHERE id = ?';
+        $row = $this->db->fetchOne($sql, [$this->id]);
+
+        if ($row === null) {
+            return;
+        }
+
+        $this->orderNo = $row['order_no'];
+        $this->userId = (int) $row['user_id'];
+        $this->totalAmount = (float) $row['total_amount'];
+        $this->createdAt = $row['created_at'];
+        $this->updatedAt = $row['updated_at'];
+
+        $extraData = [];
+        if (!empty($row['extra_data'])) {
+            $decoded = json_decode($row['extra_data'], true);
+            if (is_array($decoded)) {
+                $extraData = $decoded;
+            }
+        }
+        $this->extraData = $extraData;
+
+        $this->stateMachine->syncStatus($row['status']);
+
+        if (isset($extraData['_state_snapshot']) && is_array($extraData['_state_snapshot'])) {
+            $this->stateMachine->restoreFromSnapshot($extraData['_state_snapshot']);
+        }
+
+        $this->isDirty = false;
+    }
+
     private function updateStatus(string $status, string $operatorId, string $remark): void
     {
         if ($this->id === null) {
             return;
         }
 
-        $sql = 'UPDATE orders SET status = ?, updated_at = NOW() WHERE id = ?';
-        $this->db->execute($sql, [$status, $this->id]);
-
-        $this->updatedAt = date('Y-m-d H:i:s');
+        $this->stateMachine->syncStatus($status);
+        $this->isDirty = true;
     }
 
     private function logTransition(TransitionResult $result): void
@@ -211,6 +304,8 @@ class Order
     public function save(): self
     {
         if ($this->id === null) {
+            $this->persistStateSnapshot();
+
             $sql = 'INSERT INTO orders (
                 order_no, user_id, total_amount, status, 
                 extra_data, created_at, updated_at
@@ -227,7 +322,10 @@ class Order
             $this->id = (int) $this->db->lastInsertId();
             $this->createdAt = date('Y-m-d H:i:s');
             $this->updatedAt = date('Y-m-d H:i:s');
-        } else {
+            $this->isDirty = false;
+        } elseif ($this->isDirty) {
+            $this->persistStateSnapshot();
+
             $sql = 'UPDATE orders SET 
                 total_amount = ?, status = ?, extra_data = ?, updated_at = NOW()
                 WHERE id = ?';
@@ -240,6 +338,7 @@ class Order
             ]);
 
             $this->updatedAt = date('Y-m-d H:i:s');
+            $this->isDirty = false;
         }
 
         return $this;
@@ -285,18 +384,34 @@ class Order
         $order->createdAt = $row['created_at'];
         $order->updatedAt = $row['updated_at'];
 
+        $extraData = [];
         if (!empty($row['extra_data'])) {
-            $extraData = json_decode($row['extra_data'], true);
-            if (is_array($extraData)) {
-                $order->extraData = $extraData;
+            $decoded = json_decode($row['extra_data'], true);
+            if (is_array($decoded)) {
+                $extraData = $decoded;
             }
         }
+        $order->extraData = $extraData;
+
+        if (isset($extraData['_state_snapshot']) && is_array($extraData['_state_snapshot'])) {
+            $order->stateMachine->restoreFromSnapshot($extraData['_state_snapshot']);
+        }
+
+        $order->isDirty = false;
 
         return $order;
     }
 
     public function toArray(): array
     {
+        $availableEvents = $this->getAvailableEvents();
+        $availableEventsWithLabels = array_map(function ($event) {
+            return [
+                'event' => $event,
+                'label' => OrderEvent::getLabel($event),
+            ];
+        }, $availableEvents);
+
         return [
             'id' => $this->id,
             'order_no' => $this->orderNo,
@@ -306,10 +421,39 @@ class Order
             'status_label' => OrderStatus::getLabel($this->getStatus()),
             'status_color' => OrderStatus::getColor($this->getStatus()),
             'previous_status' => $this->getPreviousStatus(),
-            'available_events' => $this->getAvailableEvents(),
+            'previous_status_label' => OrderStatus::getLabel($this->getPreviousStatus()),
+            'available_events' => $availableEventsWithLabels,
+            'can_rollback' => !empty($this->getRollbackStack()),
+            'rollback_depth' => count($this->getRollbackStack()),
+            'exception_reason' => $this->stateMachine->getExceptionReason(),
             'extra_data' => $this->extraData,
             'created_at' => $this->createdAt,
             'updated_at' => $this->updatedAt,
+        ];
+    }
+
+    public function getStatusConsistencyCheck(): array
+    {
+        $dbStatus = null;
+        if ($this->id !== null) {
+            $sql = 'SELECT status FROM orders WHERE id = ?';
+            $row = $this->db->fetchOne($sql, [$this->id]);
+            if ($row !== null) {
+                $dbStatus = $row['status'];
+            }
+        }
+
+        $memoryStatus = $this->getStatus();
+        $snapshotStatus = isset($this->extraData['_state_snapshot']['current_status'])
+            ? $this->extraData['_state_snapshot']['current_status']
+            : null;
+
+        return [
+            'db_status' => $dbStatus,
+            'memory_status' => $memoryStatus,
+            'snapshot_status' => $snapshotStatus,
+            'is_consistent' => ($dbStatus === null || $dbStatus === $memoryStatus)
+                && ($snapshotStatus === null || $snapshotStatus === $memoryStatus),
         ];
     }
 

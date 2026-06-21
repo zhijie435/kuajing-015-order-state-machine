@@ -50,14 +50,60 @@ class OrderService
     {
         $order = $this->getOrderById($orderId);
         if ($order === null) {
-            throw StateMachineException::validationFailed('Order not found');
+            throw StateMachineException::validationFailed('订单不存在');
         }
 
-        if (!$order->can($event)) {
-            throw StateMachineException::invalidTransition($order->getStatus(), $event);
+        $validationResult = $order->checkCan($event);
+        if (!$validationResult['allowed']) {
+            throw StateMachineException::validationFailed(
+                $validationResult['error_message'] . ' ' . ($validationResult['suggestion'] ?? '')
+            );
         }
 
         return $order->apply($event, $operatorId, $remark);
+    }
+
+    public function validateEvent(int $orderId, string $event): array
+    {
+        $order = $this->getOrderById($orderId);
+        if ($order === null) {
+            return [
+                'allowed' => false,
+                'error_code' => 'order_not_found',
+                'error_message' => '订单不存在',
+                'suggestion' => '请检查订单ID是否正确',
+            ];
+        }
+
+        $validationResult = $order->checkCan($event);
+
+        if (!$validationResult['allowed']) {
+            $eventLabel = OrderEvent::getLabel($event);
+            $currentStatusLabel = OrderStatus::getLabel($order->getStatus());
+
+            $validationResult['order_info'] = [
+                'order_id' => $orderId,
+                'order_no' => $order->getOrderNo(),
+                'current_status' => $order->getStatus(),
+                'current_status_label' => $currentStatusLabel,
+            ];
+
+            $validationResult['requested_action'] = [
+                'event' => $event,
+                'event_label' => $eventLabel,
+            ];
+        }
+
+        return $validationResult;
+    }
+
+    public function batchValidateEvents(int $orderId, array $events): array
+    {
+        $results = [];
+        foreach ($events as $event) {
+            $results[$event] = $this->validateEvent($orderId, $event);
+        }
+        return $results;
     }
 
     public function pay(int $orderId, string $operatorId = '', string $remark = ''): TransitionResult
@@ -244,10 +290,8 @@ class OrderService
 
         $orders = [];
         foreach ($rows as $row) {
-            $order = Order::findById((int) $row['id'], $this->config);
-            if ($order !== null) {
-                $orders[] = $order->toArray();
-            }
+            $order = $this->createOrderFromRow($row);
+            $orders[] = $order->toArray();
         }
 
         return [
@@ -257,5 +301,74 @@ class OrderService
             'total_pages' => (int) ceil($total / $pageSize),
             'items' => $orders,
         ];
+    }
+
+    private function createOrderFromRow(array $row): Order
+    {
+        $order = new Order(
+            $row['order_no'],
+            (int) $row['user_id'],
+            (float) $row['total_amount'],
+            $row['status'],
+            $this->config,
+            (int) $row['id']
+        );
+
+        $reflection = new \ReflectionClass($order);
+
+        $createdAtProp = $reflection->getProperty('createdAt');
+        $createdAtProp->setAccessible(true);
+        $createdAtProp->setValue($order, $row['created_at']);
+
+        $updatedAtProp = $reflection->getProperty('updatedAt');
+        $updatedAtProp->setAccessible(true);
+        $updatedAtProp->setValue($order, $row['updated_at']);
+
+        $extraData = [];
+        if (!empty($row['extra_data'])) {
+            $decoded = json_decode($row['extra_data'], true);
+            if (is_array($decoded)) {
+                $extraData = $decoded;
+            }
+        }
+
+        $extraDataProp = $reflection->getProperty('extraData');
+        $extraDataProp->setAccessible(true);
+        $extraDataProp->setValue($order, $extraData);
+
+        $stateMachine = $order->getStateMachine();
+        if (isset($extraData['_state_snapshot']) && is_array($extraData['_state_snapshot'])) {
+            $stateMachine->restoreFromSnapshot($extraData['_state_snapshot']);
+        }
+
+        $isDirtyProp = $reflection->getProperty('isDirty');
+        $isDirtyProp->setAccessible(true);
+        $isDirtyProp->setValue($order, false);
+
+        return $order;
+    }
+
+    public function getOrderDetail(int $orderId): ?array
+    {
+        $order = $this->getOrderById($orderId);
+        if ($order === null) {
+            return null;
+        }
+
+        $detail = $order->toArray();
+        $detail['status_logs'] = $this->getOrderStatusLogs($orderId);
+        $detail['consistency_check'] = $order->getStatusConsistencyCheck();
+
+        return $detail;
+    }
+
+    public function checkStatusConsistency(int $orderId): array
+    {
+        $order = $this->getOrderById($orderId);
+        if ($order === null) {
+            throw StateMachineException::validationFailed('Order not found');
+        }
+
+        return $order->getStatusConsistencyCheck();
     }
 }

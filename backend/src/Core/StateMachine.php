@@ -90,24 +90,171 @@ class StateMachine
 
     public function can(string $event, object $context = null): bool
     {
+        $result = $this->checkCan($event, $context);
+        return $result['allowed'];
+    }
+
+    public function checkCan(string $event, object $context = null): array
+    {
         if (!OrderEvent::exists($event)) {
-            return false;
+            return [
+                'allowed' => false,
+                'error_code' => 'invalid_event',
+                'error_message' => sprintf('无效的操作: "%s"', $event),
+                'suggestion' => '请检查操作是否正确',
+            ];
         }
 
-        if ($this->currentStatus === OrderStatus::EXCEPTION && $event !== OrderEvent::RESOLVE_EXCEPTION) {
-            return false;
+        if ($this->currentStatus === OrderStatus::EXCEPTION) {
+            if ($event === OrderEvent::RESOLVE_EXCEPTION) {
+                return [
+                    'allowed' => true,
+                    'error_code' => null,
+                    'error_message' => null,
+                    'suggestion' => null,
+                ];
+            }
+            return [
+                'allowed' => false,
+                'error_code' => 'exception_state',
+                'error_message' => sprintf('订单处于异常状态，无法执行 "%s" 操作', OrderEvent::getLabel($event)),
+                'suggestion' => '请先解决异常或联系管理员',
+            ];
         }
 
         if ($event === OrderEvent::MARK_EXCEPTION) {
-            return !OrderStatus::isTerminal($this->currentStatus);
+            if (OrderStatus::isTerminal($this->currentStatus)) {
+                return [
+                    'allowed' => false,
+                    'error_code' => 'terminal_status',
+                    'error_message' => sprintf('终态订单 "%s" 无法标记异常', OrderStatus::getLabel($this->currentStatus)),
+                    'suggestion' => '终态订单不支持异常标记操作',
+                ];
+            }
+            return [
+                'allowed' => true,
+                'error_code' => null,
+                'error_message' => null,
+                'suggestion' => null,
+            ];
+        }
+
+        if ($event === OrderEvent::ROLLBACK) {
+            if (!$this->config['rollback_enabled']) {
+                return [
+                    'allowed' => false,
+                    'error_code' => 'rollback_disabled',
+                    'error_message' => '系统未启用回滚功能',
+                    'suggestion' => '请联系管理员开启回滚功能',
+                ];
+            }
+            if (empty($this->rollbackStack)) {
+                return [
+                    'allowed' => false,
+                    'error_code' => 'no_rollback_history',
+                    'error_message' => '没有可回滚的历史记录',
+                    'suggestion' => '当前订单状态无需回滚',
+                ];
+            }
+            if (count($this->rollbackStack) >= $this->config['max_rollback_depth']) {
+                return [
+                    'allowed' => false,
+                    'error_code' => 'rollback_depth_exceeded',
+                    'error_message' => sprintf('已达到最大回滚深度 (%d) 限制', $this->config['max_rollback_depth']),
+                    'suggestion' => '请联系管理员进行特殊处理',
+                ];
+            }
+            return [
+                'allowed' => true,
+                'error_code' => null,
+                'error_message' => null,
+                'suggestion' => null,
+            ];
+        }
+
+        if (OrderStatus::isTerminal($this->currentStatus)) {
+            return [
+                'allowed' => false,
+                'error_code' => 'terminal_status',
+                'error_message' => sprintf('终态订单 "%s" 无法执行 "%s" 操作', OrderStatus::getLabel($this->currentStatus), OrderEvent::getLabel($event)),
+                'suggestion' => '终态订单不支持状态变更',
+            ];
         }
 
         $key = $this->currentStatus . '.' . $event;
         if (!isset($this->transitions[$key])) {
-            return false;
+            $allowedEvents = $this->getAllowedEventsFromCurrentStatus();
+            $allowedEventLabels = array_map(function ($e) {
+                return OrderEvent::getLabel($e);
+            }, $allowedEvents);
+            return [
+                'allowed' => false,
+                'error_code' => 'invalid_transition',
+                'error_message' => sprintf('当前状态 "%s" 不支持 "%s" 操作', OrderStatus::getLabel($this->currentStatus), OrderEvent::getLabel($event)),
+                'suggestion' => !empty($allowedEventLabels)
+                    ? sprintf('当前可执行操作: %s', implode('、', $allowedEventLabels))
+                    : '当前状态无可执行操作',
+                'allowed_events' => $allowedEvents,
+            ];
         }
 
-        return $this->transitions[$key]->canTransition($context);
+        $transition = $this->transitions[$key];
+        if (!$transition->canTransition($context)) {
+            return [
+                'allowed' => false,
+                'error_code' => 'guard_failed',
+                'error_message' => sprintf('操作 "%s" 的前置条件未满足', OrderEvent::getLabel($event)),
+                'suggestion' => '请检查订单信息是否完整或联系管理员',
+            ];
+        }
+
+        return [
+            'allowed' => true,
+            'error_code' => null,
+            'error_message' => null,
+            'suggestion' => null,
+        ];
+    }
+
+    private function getAllowedEventsFromCurrentStatus(): array
+    {
+        $allowedEvents = [];
+
+        if ($this->currentStatus === OrderStatus::EXCEPTION) {
+            $allowedEvents[] = OrderEvent::RESOLVE_EXCEPTION;
+            return $allowedEvents;
+        }
+
+        if (!OrderStatus::isTerminal($this->currentStatus)) {
+            $allowedEvents[] = OrderEvent::MARK_EXCEPTION;
+        }
+
+        if (!empty($this->rollbackStack) && $this->config['rollback_enabled']) {
+            $allowedEvents[] = OrderEvent::ROLLBACK;
+        }
+
+        foreach ($this->transitions as $key => $transition) {
+            [$fromStatus, $event] = explode('.', $key, 2);
+            if ($fromStatus === $this->currentStatus && !in_array($event, $allowedEvents, true)) {
+                $allowedEvents[] = $event;
+            }
+        }
+
+        return $allowedEvents;
+    }
+
+    public function getValidationErrors(string $event, object $context = null): array
+    {
+        $result = $this->checkCan($event, $context);
+        if ($result['allowed']) {
+            return [];
+        }
+        return [
+            'code' => $result['error_code'],
+            'message' => $result['error_message'],
+            'suggestion' => $result['suggestion'] ?? '',
+            'details' => $result['allowed_events'] ?? [],
+        ];
     }
 
     public function apply(string $event, object $context = null, string $operatorId = '', string $remark = ''): TransitionResult
@@ -392,5 +539,38 @@ class StateMachine
             ];
         }
         return $map;
+    }
+
+    public function getSnapshot(): array
+    {
+        return [
+            'current_status' => $this->currentStatus,
+            'previous_status' => $this->previousStatus,
+            'rollback_stack' => $this->rollbackStack,
+            'exception_reason' => $this->exceptionReason,
+        ];
+    }
+
+    public function restoreFromSnapshot(array $snapshot): void
+    {
+        if (isset($snapshot['current_status']) && OrderStatus::exists($snapshot['current_status'])) {
+            $this->currentStatus = $snapshot['current_status'];
+        }
+        if (isset($snapshot['previous_status']) && OrderStatus::exists($snapshot['previous_status'])) {
+            $this->previousStatus = $snapshot['previous_status'];
+        }
+        if (isset($snapshot['rollback_stack']) && is_array($snapshot['rollback_stack'])) {
+            $this->rollbackStack = $snapshot['rollback_stack'];
+        }
+        if (isset($snapshot['exception_reason'])) {
+            $this->exceptionReason = $snapshot['exception_reason'];
+        }
+    }
+
+    public function syncStatus(string $status): void
+    {
+        if (OrderStatus::exists($status)) {
+            $this->currentStatus = $status;
+        }
     }
 }
