@@ -16,19 +16,21 @@ class StateMachineException extends Exception
     const CODE_EXCEPTION_STATE = 1008;
     const CODE_VALIDATION_FAILED = 1009;
     const CODE_TRANSACTION_FAILED = 1010;
+    const CODE_ROLLBACK_AUDIT_REQUIRED = 1011;
 
-    public static function invalidTransition(string $from, string $event): self
+    public static function invalidTransition(string $from, string $event, ?string $suggestion = null): self
     {
-        return new self(
-            sprintf('Invalid state transition: cannot apply event "%s" from status "%s"', $event, $from),
-            self::CODE_INVALID_TRANSITION
-        );
+        $message = sprintf('当前状态 "%s" 不支持 "%s" 操作', $from, $event);
+        if ($suggestion !== null) {
+            $message .= '，' . $suggestion;
+        }
+        return new self($message, self::CODE_INVALID_TRANSITION);
     }
 
     public static function invalidStatus(string $status): self
     {
         return new self(
-            sprintf('Invalid order status: "%s"', $status),
+            sprintf('无效的订单状态: "%s"', $status),
             self::CODE_INVALID_STATUS
         );
     }
@@ -36,7 +38,7 @@ class StateMachineException extends Exception
     public static function invalidEvent(string $event): self
     {
         return new self(
-            sprintf('Invalid event: "%s"', $event),
+            sprintf('无效的操作: "%s"', $event),
             self::CODE_INVALID_EVENT
         );
     }
@@ -44,7 +46,7 @@ class StateMachineException extends Exception
     public static function terminalStatus(string $status): self
     {
         return new self(
-            sprintf('Cannot transition from terminal status: "%s"', $status),
+            sprintf('终态订单 "%s" 无法执行状态变更操作', $status),
             self::CODE_TERMINAL_STATUS
         );
     }
@@ -52,7 +54,7 @@ class StateMachineException extends Exception
     public static function rollbackDisabled(): self
     {
         return new self(
-            'Rollback is disabled in configuration',
+            '系统未启用回滚功能',
             self::CODE_ROLLBACK_DISABLED
         );
     }
@@ -60,7 +62,7 @@ class StateMachineException extends Exception
     public static function rollbackDepthExceeded(int $maxDepth): self
     {
         return new self(
-            sprintf('Maximum rollback depth (%d) exceeded', $maxDepth),
+            sprintf('已达到最大回滚深度 (%d) 限制', $maxDepth),
             self::CODE_ROLLBACK_DEPTH_EXCEEDED
         );
     }
@@ -68,7 +70,7 @@ class StateMachineException extends Exception
     public static function noRollbackHistory(): self
     {
         return new self(
-            'No rollback history available',
+            '没有可回滚的历史记录',
             self::CODE_NO_ROLLBACK_HISTORY
         );
     }
@@ -76,24 +78,29 @@ class StateMachineException extends Exception
     public static function exceptionState(string $action): self
     {
         return new self(
-            sprintf('Cannot perform "%s" while order is in exception state', $action),
+            sprintf('订单处于异常状态，无法执行 "%s" 操作', $action),
             self::CODE_EXCEPTION_STATE
         );
     }
 
     public static function validationFailed(string $message): self
     {
-        return new self(
-            sprintf('Validation failed: %s', $message),
-            self::CODE_VALIDATION_FAILED
-        );
+        return new self($message, self::CODE_VALIDATION_FAILED);
     }
 
     public static function transactionFailed(string $message): self
     {
         return new self(
-            sprintf('Transaction failed: %s', $message),
+            sprintf('事务执行失败: %s', $message),
             self::CODE_TRANSACTION_FAILED
+        );
+    }
+
+    public static function rollbackAuditRequired(string $reason): self
+    {
+        return new self(
+            sprintf('该订单受回滚保护，需要审核通过后才能执行回滚操作，%s，请提交回滚审核申请或联系管理员', $reason),
+            self::CODE_ROLLBACK_AUDIT_REQUIRED
         );
     }
 }

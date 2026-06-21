@@ -49,6 +49,7 @@ class ApiResponse
             StateMachineException::CODE_EXCEPTION_STATE => 'EXCEPTION_STATE',
             StateMachineException::CODE_VALIDATION_FAILED => 'VALIDATION_FAILED',
             StateMachineException::CODE_TRANSACTION_FAILED => 'TRANSACTION_FAILED',
+            StateMachineException::CODE_ROLLBACK_AUDIT_REQUIRED => 'ROLLBACK_AUDIT_REQUIRED',
         ];
 
         $errorCode = $errorCodeMap[$e->getCode()] ?? 'UNKNOWN_ERROR';
@@ -97,6 +98,7 @@ class ApiResponse
             'ROLLBACK_DISABLED' => '系统未启用回滚功能，请联系管理员',
             'ROLLBACK_DEPTH_EXCEEDED' => '已达到最大回滚深度，请联系管理员处理',
             'NO_ROLLBACK_HISTORY' => '没有可回滚的历史记录',
+            'ROLLBACK_AUDIT_REQUIRED' => '该订单受回滚保护，请提交回滚审核申请或联系管理员审批',
         ];
 
         if (!empty($context['can_rollback'])) {

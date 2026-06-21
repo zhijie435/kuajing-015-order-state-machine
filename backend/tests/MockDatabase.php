@@ -312,8 +312,13 @@ namespace {
             $where = $this->parseWhereClause($whereClause);
 
             $orderBy = null;
+            $orderDir = 'ASC';
             if ($orderByClause) {
-                $orderBy = trim(explode(' ', trim($orderByClause))[0]);
+                $parts = preg_split('/\s+/', trim($orderByClause), 2, PREG_SPLIT_NO_EMPTY);
+                $orderBy = $parts[0];
+                if (isset($parts[1]) && strtoupper($parts[1]) === 'DESC') {
+                    $orderDir = 'DESC';
+                }
             }
 
             $limit = null;
@@ -322,7 +327,7 @@ namespace {
                 $limit = (int)end($parts);
             }
 
-            $rows = $this->executeSelect($table, $where, $orderBy, $limit);
+            $rows = $this->executeSelect($table, $where, $orderBy, $orderDir, $limit);
             $stmt->setResultSet($rows);
             $stmt->setAffectedRows(count($rows));
         }
@@ -404,7 +409,7 @@ namespace {
             return $count;
         }
 
-        public function executeSelect(string $table, array $where = [], ?string $orderBy = null, $limit = null): array
+        public function executeSelect(string $table, array $where = [], ?string $orderBy = null, string $orderDir = 'ASC', $limit = null): array
         {
             if (!isset($this->tables[$table])) {
                 return [];
@@ -423,8 +428,11 @@ namespace {
                 }
             }
             if ($orderBy) {
-                usort($result, function ($a, $b) use ($orderBy) {
-                    return $b[$orderBy] <=> $a[$orderBy];
+                usort($result, function ($a, $b) use ($orderBy, $orderDir) {
+                    if ($orderDir === 'DESC') {
+                        return $b[$orderBy] <=> $a[$orderBy];
+                    }
+                    return $a[$orderBy] <=> $b[$orderBy];
                 });
             }
             if ($limit !== null) {

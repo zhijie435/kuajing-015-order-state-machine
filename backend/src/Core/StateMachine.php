@@ -14,7 +14,19 @@ class StateMachine
     private array $rollbackStack = [];
     private string $previousStatus;
     private ?string $exceptionReason = null;
+    private ?string $preExceptionStatus = null;
+    private ?string $exceptionType = null;
     private array $config;
+
+    private const EXCEPTION_RESOLVE_MAP = [
+        'payment_abnormal' => [OrderStatus::PENDING, OrderStatus::PAID, OrderStatus::CANCELLED],
+        'shipping_abnormal' => [OrderStatus::PAID, OrderStatus::SHIPPED, OrderStatus::CANCELLED],
+        'system_abnormal' => [],
+        'manual_handling' => [],
+        'inventory_abnormal' => [OrderStatus::PENDING, OrderStatus::PAID, OrderStatus::CANCELLED],
+        'refund_abnormal' => [OrderStatus::PAID, OrderStatus::REFUNDING, OrderStatus::CANCELLED],
+        'other' => [],
+    ];
 
     public function __construct(string $initialStatus = OrderStatus::PENDING, array $config = [])
     {
@@ -86,6 +98,16 @@ class StateMachine
     public function getExceptionReason(): ?string
     {
         return $this->exceptionReason;
+    }
+
+    public function getPreExceptionStatus(): ?string
+    {
+        return $this->preExceptionStatus;
+    }
+
+    public function getExceptionType(): ?string
+    {
+        return $this->exceptionType;
     }
 
     public function can(string $event, object $context = null): bool
@@ -293,7 +315,7 @@ class StateMachine
         $transition = $this->transitions[$key];
 
         if (!$transition->canTransition($context)) {
-            throw StateMachineException::validationFailed('Guard condition not met');
+            throw StateMachineException::validationFailed(sprintf('操作 "%s" 的前置条件未满足，请检查订单信息是否完整', OrderEvent::getLabel($event)));
         }
 
         $fromStatus = $this->currentStatus;
@@ -314,7 +336,7 @@ class StateMachine
                 $fromStatus,
                 $toStatus,
                 $event,
-                'State transition successful',
+                sprintf('状态变更成功: %s → %s', OrderStatus::getLabel($fromStatus), OrderStatus::getLabel($toStatus)),
                 $context ? (array) $context : [],
                 $operatorId,
                 $remark
@@ -348,7 +370,7 @@ class StateMachine
         $fromStatus = $this->currentStatus;
         $this->previousStatus = $fromStatus;
         $this->currentStatus = OrderStatus::EXCEPTION;
-        $this->exceptionReason = $remark ?: 'Unknown exception';
+        $this->exceptionReason = $remark ?: '未说明的异常';
 
         $this->pushToRollbackStack($fromStatus, OrderEvent::MARK_EXCEPTION, $context, $operatorId, $remark);
 
@@ -357,7 +379,7 @@ class StateMachine
             $fromStatus,
             OrderStatus::EXCEPTION,
             OrderEvent::MARK_EXCEPTION,
-            'Order marked as exception: ' . $this->exceptionReason,
+            sprintf('订单已标记为异常: %s', $this->exceptionReason),
             $context ? (array) $context : [],
             $operatorId,
             $remark
@@ -388,7 +410,7 @@ class StateMachine
             $fromStatus,
             $targetStatus,
             OrderEvent::RESOLVE_EXCEPTION,
-            'Exception resolved, status restored to: ' . OrderStatus::getLabel($targetStatus),
+            sprintf('异常已解决，状态恢复为: %s', OrderStatus::getLabel($targetStatus)),
             $context ? (array) $context : [],
             $operatorId,
             $remark
@@ -452,10 +474,10 @@ class StateMachine
             $fromStatus,
             $toStatus,
             OrderEvent::ROLLBACK,
-            sprintf('Rolled back from %s to %s', OrderStatus::getLabel($fromStatus), OrderStatus::getLabel($toStatus)),
+            sprintf('状态已回滚: %s → %s', OrderStatus::getLabel($fromStatus), OrderStatus::getLabel($toStatus)),
             array_merge($rollbackItem['context'], $context ? (array) $context : []),
             $operatorId,
-            $remark ?: 'Rollback: ' . $rollbackItem['remark']
+            $remark ?: ('回滚: ' . $rollbackItem['remark'])
         );
 
         $this->logTransition($result);
@@ -502,7 +524,7 @@ class StateMachine
     public function forceTransition(string $toStatus, string $operatorId = '', string $remark = ''): TransitionResult
     {
         if (!$this->config['allow_force_transition']) {
-            throw StateMachineException::validationFailed('Force transition is not allowed');
+            throw StateMachineException::validationFailed('系统未启用强制状态变更功能');
         }
 
         if (!OrderStatus::exists($toStatus)) {
@@ -518,7 +540,7 @@ class StateMachine
             $fromStatus,
             $toStatus,
             'force_transition',
-            'Force transition executed',
+            sprintf('强制状态变更: %s → %s', OrderStatus::getLabel($fromStatus), OrderStatus::getLabel($toStatus)),
             [],
             $operatorId,
             $remark

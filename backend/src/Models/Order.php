@@ -271,7 +271,37 @@ class Order
 
     public function checkCan(string $event): array
     {
-        return $this->stateMachine->checkCan($event, $this);
+        $result = $this->stateMachine->checkCan($event, $this);
+
+        if ($result['allowed'] && $event === OrderEvent::ROLLBACK && $this->requiresRollbackAudit()) {
+            $reason = $this->getRollbackAuditRequiredReason();
+            return [
+                'allowed' => false,
+                'error_code' => 'rollback_audit_required',
+                'error_message' => '该订单受回滚保护，需要审核通过后才能执行回滚操作',
+                'suggestion' => $reason . '，请提交回滚审核申请或联系管理员',
+                'rollback_audit_required' => true,
+                'rollback_protection_reason' => $reason,
+            ];
+        }
+
+        return $result;
+    }
+
+    private function getRollbackAuditRequiredReason(): string
+    {
+        if ($this->rollbackProtected) {
+            return '订单已设置回滚保护';
+        }
+        $rollbackConfig = $this->config['rollback_protection'] ?? [];
+        $amountThreshold = $rollbackConfig['amount_threshold'] ?? 10000.00;
+        if ($this->totalAmount >= $amountThreshold) {
+            return sprintf('订单金额(¥%.2f)超过回免审阈值(¥%.2f)', $this->totalAmount, $amountThreshold);
+        }
+        if (OrderStatus::isTerminal($this->getStatus())) {
+            return sprintf('订单已处于终态(%s)', OrderStatus::getLabel($this->getStatus()));
+        }
+        return '订单需要回滚审核';
     }
 
     public function getValidationErrors(string $event): array
@@ -295,7 +325,14 @@ class Order
     {
         $validationResult = $this->checkCan($event);
         if (!$validationResult['allowed']) {
-            throw StateMachineException::invalidTransition($this->getStatus(), $event);
+            if ($event === OrderEvent::ROLLBACK && $this->requiresRollbackAudit()) {
+                throw StateMachineException::rollbackAuditRequired($this->getRollbackAuditRequiredReason());
+            }
+            $message = $validationResult['error_message'];
+            if (!empty($validationResult['suggestion'])) {
+                $message .= '，' . $validationResult['suggestion'];
+            }
+            throw StateMachineException::validationFailed($message);
         }
 
         return $this->db->transactional(function () use ($event, $operatorId, $remark) {
@@ -355,9 +392,7 @@ class Order
     public function rollback(string $operatorId = '', string $remark = ''): TransitionResult
     {
         if ($this->requiresRollbackAudit()) {
-            throw StateMachineException::validationFailed(
-                '该订单受回滚保护，需要审核通过后才能执行回滚操作'
-            );
+            throw StateMachineException::rollbackAuditRequired($this->getRollbackAuditRequiredReason());
         }
 
         return $this->db->transactional(function () use ($operatorId, $remark) {
@@ -377,7 +412,13 @@ class Order
 
     public function getAvailableEvents(): array
     {
-        return $this->stateMachine->getAvailableEvents();
+        $events = $this->stateMachine->getAvailableEvents();
+        if ($this->requiresRollbackAudit()) {
+            $events = array_values(array_filter($events, function ($event) {
+                return $event !== OrderEvent::ROLLBACK;
+            }));
+        }
+        return $events;
     }
 
     public function getTransitionHistory(int $limit = 50): array
