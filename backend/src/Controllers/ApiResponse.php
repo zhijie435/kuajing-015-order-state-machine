@@ -50,6 +50,7 @@ class ApiResponse
             StateMachineException::CODE_VALIDATION_FAILED => 'VALIDATION_FAILED',
             StateMachineException::CODE_TRANSACTION_FAILED => 'TRANSACTION_FAILED',
             StateMachineException::CODE_ROLLBACK_AUDIT_REQUIRED => 'ROLLBACK_AUDIT_REQUIRED',
+            StateMachineException::CODE_PERMISSION_DENIED => 'PERMISSION_DENIED',
         ];
 
         $errorCode = $errorCodeMap[$e->getCode()] ?? 'UNKNOWN_ERROR';
@@ -59,10 +60,13 @@ class ApiResponse
             StateMachineException::CODE_VALIDATION_FAILED,
         ], true);
 
+        $isRollbackAuditRequired = ($e->getCode() === StateMachineException::CODE_ROLLBACK_AUDIT_REQUIRED);
+
         $errors = [
             'error_code' => $errorCode,
             'retryable' => $retryable,
-            'rollback_available' => $context['can_rollback'] ?? false,
+            'rollback_available' => !$isRollbackAuditRequired && ($context['can_rollback'] ?? false),
+            'rollback_audit_required' => $isRollbackAuditRequired,
             'suggestion' => $context['suggestion'] ?? self::getSuggestionForErrorCode($errorCode, $context),
         ];
 
@@ -78,9 +82,10 @@ class ApiResponse
             $response['data'] = [
                 'order_id' => $context['order_id'] ?? null,
                 'current_status' => $context['current_status'] ?? null,
-                'can_rollback' => $context['can_rollback'] ?? false,
+                'can_rollback' => !$isRollbackAuditRequired && ($context['can_rollback'] ?? false),
                 'rollback_depth' => $context['rollback_depth'] ?? 0,
                 'failed_event' => $context['failed_event'] ?? null,
+                'rollback_audit_required' => $isRollbackAuditRequired,
             ];
         }
 
@@ -99,6 +104,7 @@ class ApiResponse
             'ROLLBACK_DEPTH_EXCEEDED' => '已达到最大回滚深度，请联系管理员处理',
             'NO_ROLLBACK_HISTORY' => '没有可回滚的历史记录',
             'ROLLBACK_AUDIT_REQUIRED' => '该订单受回滚保护，请提交回滚审核申请或联系管理员审批',
+            'PERMISSION_DENIED' => '您没有执行该操作的权限，请联系管理员开通相应权限',
         ];
 
         if (!empty($context['can_rollback'])) {

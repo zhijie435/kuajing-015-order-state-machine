@@ -34,6 +34,7 @@ class OrderServiceTest extends TestCase
         ];
 
         Database::resetInstance();
+        \PermissionService::setOperatorContext('test_admin', 'super_admin', null);
     }
 
     public function testCreateOrderValidation()

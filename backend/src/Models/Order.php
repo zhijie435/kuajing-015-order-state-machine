@@ -220,18 +220,7 @@ class Order
 
     public function requiresRollbackAudit(): bool
     {
-        if ($this->rollbackProtected) {
-            return true;
-        }
-        $rollbackConfig = $this->config['rollback_protection'] ?? [];
-        $amountThreshold = $rollbackConfig['amount_threshold'] ?? 10000.00;
-        if ($this->totalAmount >= $amountThreshold) {
-            return true;
-        }
-        if (OrderStatus::isTerminal($this->getStatus())) {
-            return true;
-        }
-        return false;
+        return $this->isRollbackBlocked();
     }
 
     public function getCreatedAt(): ?string
@@ -273,35 +262,98 @@ class Order
     {
         $result = $this->stateMachine->checkCan($event, $this);
 
-        if ($result['allowed'] && $event === OrderEvent::ROLLBACK && $this->requiresRollbackAudit()) {
-            $reason = $this->getRollbackAuditRequiredReason();
+        if ($result['allowed'] && $event === OrderEvent::ROLLBACK && $this->isRollbackBlocked()) {
+            $reason = $this->getRollbackBlockReason();
             return [
                 'allowed' => false,
-                'error_code' => 'rollback_audit_required',
-                'error_message' => '该订单受回滚保护，需要审核通过后才能执行回滚操作',
-                'suggestion' => $reason . '，请提交回滚审核申请或联系管理员',
-                'rollback_audit_required' => true,
-                'rollback_protection_reason' => $reason,
+                'error_code' => $reason['error_code'],
+                'error_message' => $reason['error_message'],
+                'suggestion' => $reason['suggestion'],
+                'rollback_audit_required' => $reason['audit_required'],
+                'rollback_protection_reason' => $reason['protection_reason'] ?? null,
             ];
         }
 
         return $result;
     }
 
-    private function getRollbackAuditRequiredReason(): string
+    public function isRollbackBlocked(): bool
     {
-        if ($this->rollbackProtected) {
-            return '订单已设置回滚保护';
+        if ($this->hasActiveRollbackProtections()) {
+            return true;
         }
-        $rollbackConfig = $this->config['rollback_protection'] ?? [];
-        $amountThreshold = $rollbackConfig['amount_threshold'] ?? 10000.00;
-        if ($this->totalAmount >= $amountThreshold) {
-            return sprintf('订单金额(¥%.2f)超过回免审阈值(¥%.2f)', $this->totalAmount, $amountThreshold);
+        if ($this->isRollbackAuditRequiredByAmount()) {
+            return true;
         }
         if (OrderStatus::isTerminal($this->getStatus())) {
-            return sprintf('订单已处于终态(%s)', OrderStatus::getLabel($this->getStatus()));
+            return true;
         }
-        return '订单需要回滚审核';
+        return false;
+    }
+
+    private function getRollbackBlockReason(): array
+    {
+        if ($this->hasActiveRollbackProtections()) {
+            return [
+                'error_code' => 'rollback_audit_required',
+                'error_message' => '该订单受回滚保护，需要审核通过后才能执行回滚操作',
+                'suggestion' => '请提交回滚审核申请或联系管理员解除保护',
+                'audit_required' => true,
+                'protection_reason' => '订单已设置回滚保护',
+            ];
+        }
+        if ($this->isRollbackAuditRequiredByAmount()) {
+            $rollbackConfig = $this->config['rollback_protection'] ?? [];
+            $amountThreshold = $rollbackConfig['amount_threshold'] ?? 10000.00;
+            return [
+                'error_code' => 'rollback_audit_required',
+                'error_message' => '该订单受回滚保护，需要审核通过后才能执行回滚操作',
+                'suggestion' => sprintf('订单金额(¥%.2f)超过回免审阈值(¥%.2f)，请提交回滚审核申请', $this->totalAmount, $amountThreshold),
+                'audit_required' => true,
+                'protection_reason' => sprintf('订单金额(¥%.2f)超过回免审阈值(¥%.2f)', $this->totalAmount, $amountThreshold),
+            ];
+        }
+        if (OrderStatus::isTerminal($this->getStatus())) {
+            return [
+                'error_code' => 'rollback_audit_required',
+                'error_message' => '该订单受回滚保护，需要审核通过后才能执行回滚操作',
+                'suggestion' => sprintf('订单已处于终态(%s)，请提交回滚审核申请', OrderStatus::getLabel($this->getStatus())),
+                'audit_required' => true,
+                'protection_reason' => sprintf('订单已处于终态(%s)', OrderStatus::getLabel($this->getStatus())),
+            ];
+        }
+        return [
+            'error_code' => 'rollback_blocked',
+            'error_message' => '回滚操作被阻止',
+            'suggestion' => '请联系管理员',
+            'audit_required' => false,
+        ];
+    }
+
+    public function hasActiveRollbackProtections(): bool
+    {
+        if (!$this->rollbackProtected) {
+            return false;
+        }
+        if ($this->id === null) {
+            return true;
+        }
+        $protections = OrderRollbackProtection::findActiveProtections($this->id, $this->config);
+        foreach ($protections as $protection) {
+            if ($protection->isValid()) {
+                return true;
+            }
+        }
+        $this->setRollbackProtected(false);
+        $this->save();
+        return false;
+    }
+
+    private function isRollbackAuditRequiredByAmount(): bool
+    {
+        $rollbackConfig = $this->config['rollback_protection'] ?? [];
+        $amountThreshold = $rollbackConfig['amount_threshold'] ?? 10000.00;
+        return $this->totalAmount >= $amountThreshold;
     }
 
     public function getValidationErrors(string $event): array
@@ -353,8 +405,12 @@ class Order
         string $exceptionType = ExceptionType::OTHER,
         int $exceptionLevel = ExceptionLevel::MEDIUM
     ): TransitionResult {
-        return $this->db->transactional(function () use ($reason, $operatorId, $exceptionType, $exceptionLevel) {
-            $result = $this->stateMachine->apply(OrderEvent::MARK_EXCEPTION, $this, $operatorId, $reason);
+        $context = new \stdClass();
+        $context->exceptionType = $exceptionType;
+        $context->exceptionLevel = $exceptionLevel;
+
+        return $this->db->transactional(function () use ($reason, $operatorId, $exceptionType, $exceptionLevel, $context) {
+            $result = $this->stateMachine->apply(OrderEvent::MARK_EXCEPTION, $context, $operatorId, $reason);
 
             $this->persistStateSnapshot();
             $this->updateStatus($result->getToStatus(), $operatorId, $reason);
@@ -881,6 +937,13 @@ class Order
             'rollback_depth' => count($this->getRollbackStack()),
             'rollback_count' => $this->rollbackCount,
             'exception_reason' => $this->stateMachine->getExceptionReason(),
+            'pre_exception_status' => $this->stateMachine->getPreExceptionStatus(),
+            'pre_exception_status_label' => $this->stateMachine->getPreExceptionStatus()
+                ? OrderStatus::getLabel($this->stateMachine->getPreExceptionStatus())
+                : null,
+            'allowed_resolve_targets' => $this->getStatus() === OrderStatus::EXCEPTION
+                ? $this->stateMachine->getAllowedResolveTargets()
+                : [],
             'audit_status' => $this->auditStatus,
             'audit_status_label' => $this->getAuditStatusLabel(),
             'audit_status_color' => $this->getAuditStatusColor(),

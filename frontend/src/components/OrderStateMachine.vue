@@ -111,12 +111,20 @@
           解决异常
         </el-button>
         <el-button
-          v-if="order && order.can_rollback"
+          v-if="order && order.can_rollback && !order.requires_rollback_audit"
           type="warning"
           @click="executeRollback"
           :loading="loading === 'rollback'"
         >
           回滚 ({{ order.rollback_depth }})
+        </el-button>
+        <el-button
+          v-if="order && order.requires_rollback_audit && order.rollback_depth > 0"
+          type="warning"
+          @click="showRollbackAuditDialog = true"
+          :loading="loading === 'submit_rollback_audit'"
+        >
+          申请回滚审核
         </el-button>
         <el-button
           type="danger"
@@ -170,6 +178,15 @@
                 :loading="loading === 'rollback'"
               >
                 回滚到上一状态
+              </el-button>
+              <el-button
+                v-if="failureInfo.rollbackAuditRequired"
+                type="warning"
+                size="small"
+                @click="showRollbackAuditDialog = true"
+                :loading="loading === 'submit_rollback_audit'"
+              >
+                提交回滚审核申请
               </el-button>
             </div>
           </template>
@@ -257,6 +274,37 @@
         </el-button>
       </template>
     </el-dialog>
+
+    <el-dialog v-model="showRollbackAuditDialog" title="提交回滚审核申请" width="500px">
+      <el-alert
+        title="该订单受回滚保护，需要审核通过后才能执行回滚操作"
+        type="warning"
+        show-icon
+        :closable="false"
+        style="margin-bottom: 20px"
+      >
+        <template #default>
+          <p v-if="order && order.rollback_protected">原因：订单已设置回滚保护</p>
+          <p v-else-if="order && order.rollback_depth > 0">原因：订单金额或状态需要审核</p>
+        </template>
+      </el-alert>
+      <el-form :model="rollbackAuditForm" label-width="80px">
+        <el-form-item label="申请原因" required>
+          <el-input
+            v-model="rollbackAuditForm.reason"
+            type="textarea"
+            :rows="3"
+            placeholder="请说明申请回滚的原因"
+          />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="showRollbackAuditDialog = false">取消</el-button>
+        <el-button type="warning" @click="confirmSubmitRollbackAudit" :loading="loading === 'submit_rollback_audit'">
+          提交申请
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -283,6 +331,7 @@ const statusLogs = ref([])
 const loading = ref('')
 const showExceptionDialog = ref(false)
 const showResolveDialog = ref(false)
+const showRollbackAuditDialog = ref(false)
 const lastValidationError = ref(null)
 const consistencyCheck = ref(null)
 const stateMachineConfig = ref(null)
@@ -296,6 +345,10 @@ const exceptionForm = reactive({
 const resolveForm = reactive({
   target_status: '',
   remark: '',
+})
+
+const rollbackAuditForm = reactive({
+  reason: '',
 })
 
 const currentStatus = computed(() => order.value?.status || '')
@@ -507,6 +560,7 @@ const executeAction = async (event) => {
       const data = result.data || {}
       const rollbackAvailable = !!(errors.rollback_available || data.can_rollback || (order.value && order.value.can_rollback))
       const retryable = !!errors.retryable
+      const rollbackAuditRequired = !!(errors.rollback_audit_required || data.rollback_audit_required)
 
       failureInfo.value = {
         event: event,
@@ -516,9 +570,17 @@ const executeAction = async (event) => {
         suggestion: errors.suggestion || '',
         retryable: retryable,
         rollbackAvailable: rollbackAvailable,
+        rollbackAuditRequired: rollbackAuditRequired,
       }
 
-      if (rollbackAvailable) {
+      if (rollbackAuditRequired) {
+        ElNotification({
+          title: '回滚需要审核',
+          message: `${result.message}，请提交回滚审核申请`,
+          type: 'warning',
+          duration: 0,
+        })
+      } else if (rollbackAvailable) {
         ElNotification({
           title: '操作失败',
           message: `${result.message}，可尝试回滚到上一状态或重试操作`,
@@ -663,12 +725,44 @@ const confirmResolveException = async () => {
   }
 }
 
+const confirmSubmitRollbackAudit = async () => {
+  if (!rollbackAuditForm.reason) {
+    ElMessage.warning('请输入申请原因')
+    return
+  }
+
+  loading.value = 'submit_rollback_audit'
+  try {
+    const result = await apiRequest('submit_rollback_audit', {
+      order_id: props.orderId,
+      applicant_id: 'current_user',
+      reason: rollbackAuditForm.reason,
+    })
+    if (result.code === 0) {
+      ElMessage.success('回滚审核申请已提交，请等待管理员审批')
+      showRollbackAuditDialog.value = false
+      rollbackAuditForm.reason = ''
+      failureInfo.value = null
+      await loadOrderDetail()
+      emit('status-changed', result.data)
+    } else {
+      ElMessage.error(result.message)
+    }
+  } catch (e) {
+    ElMessage.error('提交失败')
+    emit('error', e)
+  } finally {
+    loading.value = ''
+  }
+}
+
 const resetState = () => {
   order.value = null
   statusLogs.value = []
   loading.value = ''
   showExceptionDialog.value = false
   showResolveDialog.value = false
+  showRollbackAuditDialog.value = false
   lastValidationError.value = null
   consistencyCheck.value = null
   failureInfo.value = null
@@ -676,6 +770,7 @@ const resetState = () => {
   exceptionForm.remark = ''
   resolveForm.target_status = ''
   resolveForm.remark = ''
+  rollbackAuditForm.reason = ''
 }
 
 onMounted(() => {

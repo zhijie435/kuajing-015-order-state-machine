@@ -8,6 +8,7 @@ use Order\Models\Order;
 use Order\Enums\OrderStatus;
 use Order\Enums\OrderEvent;
 use Order\Exceptions\StateMachineException;
+use PermissionService;
 
 class OrderService
 {
@@ -18,8 +19,35 @@ class OrderService
         $this->config = $config;
     }
 
+    private function requirePermission(string $permission): void
+    {
+        if (!PermissionService::hasPermission($permission)) {
+            throw StateMachineException::permissionDenied($permission, PermissionService::describePermission($permission));
+        }
+    }
+
+    private function requireOrderViewAccess(Order $order): void
+    {
+        if (!PermissionService::canViewOrder($order->getUserId(), $order->getUserId())) {
+            throw StateMachineException::permissionDenied('order:view', '无权查看该订单');
+        }
+    }
+
+    private function requireEventPermission(string $event, int $orderOwnerUserId = 0): void
+    {
+        $permission = PermissionService::EVENT_PERMISSION_MAP[$event] ?? null;
+        if ($permission !== null && !PermissionService::hasPermission($permission)) {
+            throw StateMachineException::permissionDenied($permission, PermissionService::describePermission($permission));
+        }
+        if (!PermissionService::canExecuteEvent($event, $orderOwnerUserId)) {
+            throw StateMachineException::permissionDenied('order:view', '无权操作该订单');
+        }
+    }
+
     public function createOrder(int $userId, float $totalAmount, array $extraData = []): Order
     {
+        $this->requirePermission(PermissionService::PERM_ORDER_CREATE);
+
         if ($totalAmount <= 0) {
             throw StateMachineException::validationFailed('Order amount must be greater than 0');
         }
@@ -48,6 +76,8 @@ class OrderService
 
     public function applyEvent(int $orderId, string $event, string $operatorId = '', string $remark = ''): TransitionResult
     {
+        $this->requireEventPermission($event);
+
         $order = $this->getOrderById($orderId);
         if ($order === null) {
             throw StateMachineException::validationFailed('订单不存在');
@@ -65,6 +95,8 @@ class OrderService
 
     public function validateEvent(int $orderId, string $event): array
     {
+        $this->requireEventPermission($event);
+
         $order = $this->getOrderById($orderId);
         if ($order === null) {
             return [
@@ -148,6 +180,8 @@ class OrderService
 
     public function markException(int $orderId, string $reason, string $operatorId = ''): TransitionResult
     {
+        $this->requirePermission(PermissionService::PERM_ORDER_MARK_EXCEPTION);
+
         $order = $this->getOrderById($orderId);
         if ($order === null) {
             throw StateMachineException::validationFailed('Order not found');
@@ -162,6 +196,8 @@ class OrderService
 
     public function resolveException(int $orderId, string $targetStatus, string $operatorId = '', string $remark = ''): TransitionResult
     {
+        $this->requirePermission(PermissionService::PERM_ORDER_RESOLVE_EXCEPTION);
+
         $order = $this->getOrderById($orderId);
         if ($order === null) {
             throw StateMachineException::validationFailed('Order not found');
@@ -180,6 +216,8 @@ class OrderService
 
     public function rollback(int $orderId, string $operatorId = '', string $remark = ''): TransitionResult
     {
+        $this->requirePermission(PermissionService::PERM_ORDER_ROLLBACK);
+
         $order = $this->getOrderById($orderId);
         if ($order === null) {
             throw StateMachineException::validationFailed('Order not found');
@@ -190,6 +228,8 @@ class OrderService
 
     public function getOrderStatusLogs(int $orderId): array
     {
+        $this->requirePermission(PermissionService::PERM_ORDER_VIEW_LOGS);
+
         $order = $this->getOrderById($orderId);
         if ($order === null) {
             throw StateMachineException::validationFailed('Order not found');
@@ -265,6 +305,16 @@ class OrderService
     {
         $where = [];
         $params = [];
+
+        if (!PermissionService::hasPermission(PermissionService::PERM_ORDER_VIEW_ALL)) {
+            $operatorUserId = PermissionService::getOperatorUserId();
+            if ($operatorUserId !== null) {
+                $where[] = 'user_id = ?';
+                $params[] = $operatorUserId;
+            } elseif (!PermissionService::hasPermission(PermissionService::PERM_ORDER_VIEW_OWN)) {
+                throw StateMachineException::permissionDenied('order:view', '无权查看订单列表');
+            }
+        }
 
         if ($status !== '') {
             $where[] = 'status = ?';
@@ -403,6 +453,8 @@ class OrderService
 
     public function getOrderDetail(int $orderId): ?array
     {
+        $this->requirePermission(PermissionService::PERM_ORDER_VIEW_OWN);
+
         $order = $this->getOrderById($orderId);
         if ($order === null) {
             return null;
@@ -456,6 +508,8 @@ class OrderService
 
     public function getExceptionStatistics(): array
     {
+        $this->requirePermission(PermissionService::PERM_ORDER_VIEW_STATISTICS);
+
         $db = \Order\Core\Database::getInstance($this->config['db'] ?? []);
 
         $sql = 'SELECT 
@@ -503,6 +557,8 @@ class OrderService
 
     public function getAuditStatistics(): array
     {
+        $this->requirePermission(PermissionService::PERM_ORDER_VIEW_STATISTICS);
+
         $db = \Order\Core\Database::getInstance($this->config['db'] ?? []);
 
         $sql = 'SELECT audit_status, COUNT(*) as count FROM orders GROUP BY audit_status';
@@ -528,6 +584,8 @@ class OrderService
 
     public function getWritebackStatistics(): array
     {
+        $this->requirePermission(PermissionService::PERM_ORDER_VIEW_STATISTICS);
+
         $db = \Order\Core\Database::getInstance($this->config['db'] ?? []);
 
         $sql = 'SELECT writeback_status, COUNT(*) as count FROM orders GROUP BY writeback_status';
@@ -561,6 +619,8 @@ class OrderService
 
     public function submitRollbackAudit(int $orderId, string $applicantId, string $reason, array $context = []): \Order\Models\OrderAuditRecord
     {
+        $this->requirePermission(PermissionService::PERM_ORDER_ROLLBACK);
+
         $order = $this->getOrderById($orderId);
         if ($order === null) {
             throw StateMachineException::validationFailed('订单不存在');
@@ -579,6 +639,8 @@ class OrderService
 
     public function approveRollback(int $orderId, string $auditorId, string $auditRemark = '', string $remark = ''): TransitionResult
     {
+        $this->requirePermission(PermissionService::PERM_ORDER_ROLLBACK_AUDIT);
+
         $order = $this->getOrderById($orderId);
         if ($order === null) {
             throw StateMachineException::validationFailed('订单不存在');
@@ -589,6 +651,8 @@ class OrderService
 
     public function rejectRollback(int $orderId, string $auditorId, string $auditRemark = ''): \Order\Models\OrderAuditRecord
     {
+        $this->requirePermission(PermissionService::PERM_ORDER_ROLLBACK_AUDIT);
+
         $order = $this->getOrderById($orderId);
         if ($order === null) {
             throw StateMachineException::validationFailed('订单不存在');
@@ -606,6 +670,8 @@ class OrderService
         ?string $protectUntil = null,
         array $context = []
     ): \Order\Models\OrderRollbackProtection {
+        $this->requirePermission(PermissionService::PERM_ORDER_SET_PROTECTION);
+
         $order = $this->getOrderById($orderId);
         if ($order === null) {
             throw StateMachineException::validationFailed('订单不存在');
@@ -631,6 +697,8 @@ class OrderService
 
     public function removeRollbackProtection(int $orderId, string $operatorId = ''): int
     {
+        $this->requirePermission(PermissionService::PERM_ORDER_REMOVE_PROTECTION);
+
         $order = $this->getOrderById($orderId);
         if ($order === null) {
             throw StateMachineException::validationFailed('订单不存在');
@@ -680,6 +748,8 @@ class OrderService
 
     public function retryWriteback(int $logId, string $operatorId = null): bool
     {
+        $this->requirePermission(PermissionService::PERM_ORDER_RETRY_WRITEBACK);
+
         $log = \Order\Models\OrderWritebackLog::findById($logId, $this->config);
         if ($log === null) {
             throw StateMachineException::validationFailed('回写记录不存在');
@@ -765,6 +835,8 @@ class OrderService
         string $exceptionType = \Order\Enums\ExceptionType::OTHER,
         int $exceptionLevel = \Order\Enums\ExceptionLevel::MEDIUM
     ): TransitionResult {
+        $this->requirePermission(PermissionService::PERM_ORDER_MARK_EXCEPTION);
+
         $order = $this->getOrderById($orderId);
         if ($order === null) {
             throw StateMachineException::validationFailed('订单不存在');

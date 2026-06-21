@@ -1,0 +1,1001 @@
+<?php
+
+namespace Order\Tests\Core;
+
+use PHPUnit\Framework\TestCase;
+use Order\Core\StateMachine;
+use Order\Core\Transition;
+use Order\Core\TransitionResult;
+use Order\Enums\OrderStatus;
+use Order\Enums\OrderEvent;
+use Order\Enums\ExceptionType;
+use Order\Enums\ExceptionLevel;
+use Order\Enums\RollbackProtectionType;
+use Order\Exceptions\StateMachineException;
+
+class OrderStateMachineFlowTest extends TestCase
+{
+    private function createStateMachine(string $initialStatus = OrderStatus::PENDING, array $config = []): StateMachine
+    {
+        $defaultConfig = [
+            'strict_validation' => true,
+            'allow_force_transition' => false,
+            'transition_log_enabled' => true,
+            'rollback_enabled' => true,
+            'max_rollback_depth' => 3,
+        ];
+        return new StateMachine($initialStatus, array_merge($defaultConfig, $config));
+    }
+
+    public function testNormalFlowPendingToCompleted()
+    {
+        $sm = $this->createStateMachine(OrderStatus::PENDING);
+
+        $this->assertEquals(OrderStatus::PENDING, $sm->getCurrentStatus());
+        $this->assertTrue($sm->can(OrderEvent::PAY));
+        $this->assertTrue($sm->can(OrderEvent::CANCEL));
+        $this->assertTrue($sm->can(OrderEvent::MARK_EXCEPTION));
+        $this->assertFalse($sm->can(OrderEvent::SHIP));
+
+        $result = $sm->apply(OrderEvent::PAY);
+        $this->assertTrue($result->isSuccess());
+        $this->assertEquals(OrderStatus::PENDING, $result->getFromStatus());
+        $this->assertEquals(OrderStatus::PAID, $result->getToStatus());
+        $this->assertEquals(OrderEvent::PAY, $result->getEvent());
+        $this->assertEquals(OrderStatus::PAID, $sm->getCurrentStatus());
+        $this->assertEquals(OrderStatus::PENDING, $sm->getPreviousStatus());
+
+        $this->assertTrue($sm->can(OrderEvent::SHIP));
+        $this->assertTrue($sm->can(OrderEvent::CANCEL));
+        $this->assertTrue($sm->can(OrderEvent::APPLY_REFUND));
+
+        $result = $sm->apply(OrderEvent::SHIP);
+        $this->assertTrue($result->isSuccess());
+        $this->assertEquals(OrderStatus::PAID, $result->getFromStatus());
+        $this->assertEquals(OrderStatus::SHIPPED, $result->getToStatus());
+        $this->assertEquals(OrderStatus::SHIPPED, $sm->getCurrentStatus());
+        $this->assertEquals(OrderStatus::PAID, $sm->getPreviousStatus());
+
+        $this->assertTrue($sm->can(OrderEvent::CONFIRM_RECEIPT));
+        $this->assertTrue($sm->can(OrderEvent::APPLY_REFUND));
+        $this->assertFalse($sm->can(OrderEvent::PAY));
+
+        $result = $sm->apply(OrderEvent::CONFIRM_RECEIPT);
+        $this->assertTrue($result->isSuccess());
+        $this->assertEquals(OrderStatus::SHIPPED, $result->getFromStatus());
+        $this->assertEquals(OrderStatus::DELIVERED, $result->getToStatus());
+        $this->assertEquals(OrderStatus::DELIVERED, $sm->getCurrentStatus());
+        $this->assertEquals(OrderStatus::SHIPPED, $sm->getPreviousStatus());
+
+        $this->assertTrue($sm->can(OrderEvent::COMPLETE));
+        $this->assertTrue($sm->can(OrderEvent::APPLY_REFUND));
+
+        $result = $sm->apply(OrderEvent::COMPLETE);
+        $this->assertTrue($result->isSuccess());
+        $this->assertEquals(OrderStatus::DELIVERED, $result->getFromStatus());
+        $this->assertEquals(OrderStatus::COMPLETED, $result->getToStatus());
+        $this->assertEquals(OrderStatus::COMPLETED, $sm->getCurrentStatus());
+        $this->assertEquals(OrderStatus::DELIVERED, $sm->getPreviousStatus());
+
+        $this->assertTrue(OrderStatus::isTerminal($sm->getCurrentStatus()));
+
+        $history = $sm->getHistory();
+        $this->assertCount(5, $history);
+        $this->assertEquals(OrderEvent::PAY, $history[0]->getEvent());
+        $this->assertEquals(OrderEvent::COMPLETE, $history[4]->getEvent());
+    }
+
+    public function testCancelFromPending()
+    {
+        $sm = $this->createStateMachine(OrderStatus::PENDING);
+
+        $result = $sm->apply(OrderEvent::CANCEL, null, 'user_001', 'User cancelled order');
+        $this->assertTrue($result->isSuccess());
+        $this->assertEquals(OrderStatus::PENDING, $result->getFromStatus());
+        $this->assertEquals(OrderStatus::CANCELLED, $result->getToStatus());
+        $this->assertEquals(OrderEvent::CANCEL, $result->getEvent());
+        $this->assertEquals('user_001', $result->getOperatorId());
+        $this->assertEquals('User cancelled order', $result->getRemark());
+        $this->assertEquals(OrderStatus::CANCELLED, $sm->getCurrentStatus());
+        $this->assertTrue(OrderStatus::isTerminal($sm->getCurrentStatus()));
+    }
+
+    public function testCancelFromPaid()
+    {
+        $sm = $this->createStateMachine(OrderStatus::PENDING);
+        $sm->apply(OrderEvent::PAY);
+
+        $this->assertEquals(OrderStatus::PAID, $sm->getCurrentStatus());
+        $this->assertTrue($sm->can(OrderEvent::CANCEL));
+
+        $result = $sm->apply(OrderEvent::CANCEL);
+        $this->assertTrue($result->isSuccess());
+        $this->assertEquals(OrderStatus::PAID, $result->getFromStatus());
+        $this->assertEquals(OrderStatus::CANCELLED, $result->getToStatus());
+        $this->assertEquals(OrderStatus::CANCELLED, $sm->getCurrentStatus());
+        $this->assertTrue(OrderStatus::isTerminal($sm->getCurrentStatus()));
+    }
+
+    public function testCannotCancelAfterShipped()
+    {
+        $sm = $this->createStateMachine(OrderStatus::PENDING);
+        $sm->apply(OrderEvent::PAY);
+        $sm->apply(OrderEvent::SHIP);
+
+        $this->assertEquals(OrderStatus::SHIPPED, $sm->getCurrentStatus());
+        $this->assertFalse($sm->can(OrderEvent::CANCEL));
+
+        $this->expectException(StateMachineException::class);
+        $this->expectExceptionCode(StateMachineException::CODE_INVALID_TRANSITION);
+        $sm->apply(OrderEvent::CANCEL);
+    }
+
+    public function testRefundFlowFromPaidToRefunded()
+    {
+        $sm = $this->createStateMachine(OrderStatus::PAID);
+
+        $this->assertTrue(OrderStatus::isRefundable($sm->getCurrentStatus()));
+        $this->assertTrue($sm->can(OrderEvent::APPLY_REFUND));
+
+        $result = $sm->apply(OrderEvent::APPLY_REFUND, null, 'user_001', 'Wrong product');
+        $this->assertTrue($result->isSuccess());
+        $this->assertEquals(OrderStatus::PAID, $result->getFromStatus());
+        $this->assertEquals(OrderStatus::REFUNDING, $result->getToStatus());
+        $this->assertEquals(OrderStatus::REFUNDING, $sm->getCurrentStatus());
+
+        $this->assertTrue($sm->can(OrderEvent::APPROVE_REFUND));
+        $this->assertTrue($sm->can(OrderEvent::REJECT_REFUND));
+
+        $result = $sm->apply(OrderEvent::APPROVE_REFUND, null, 'admin_001', 'Refund approved');
+        $this->assertTrue($result->isSuccess());
+        $this->assertEquals(OrderStatus::REFUNDING, $result->getFromStatus());
+        $this->assertEquals(OrderStatus::REFUNDED, $result->getToStatus());
+        $this->assertEquals(OrderStatus::REFUNDED, $sm->getCurrentStatus());
+        $this->assertTrue(OrderStatus::isTerminal($sm->getCurrentStatus()));
+    }
+
+    public function testRefundFlowRejectRefundReturnsToPaid()
+    {
+        $sm = $this->createStateMachine(OrderStatus::PAID);
+        $sm->apply(OrderEvent::APPLY_REFUND);
+
+        $this->assertEquals(OrderStatus::REFUNDING, $sm->getCurrentStatus());
+
+        $result = $sm->apply(OrderEvent::REJECT_REFUND, null, 'admin_001', 'Refund rejected: out of policy');
+        $this->assertTrue($result->isSuccess());
+        $this->assertEquals(OrderStatus::REFUNDING, $result->getFromStatus());
+        $this->assertEquals(OrderStatus::PAID, $result->getToStatus());
+        $this->assertEquals(OrderStatus::PAID, $sm->getCurrentStatus());
+        $this->assertFalse(OrderStatus::isTerminal($sm->getCurrentStatus()));
+    }
+
+    public function testRefundFromShippedAndDelivered()
+    {
+        $sm = $this->createStateMachine(OrderStatus::PENDING);
+        $sm->apply(OrderEvent::PAY);
+        $sm->apply(OrderEvent::SHIP);
+
+        $this->assertEquals(OrderStatus::SHIPPED, $sm->getCurrentStatus());
+        $this->assertTrue(OrderStatus::isRefundable($sm->getCurrentStatus()));
+        $this->assertTrue($sm->can(OrderEvent::APPLY_REFUND));
+
+        $sm->apply(OrderEvent::APPLY_REFUND);
+        $this->assertEquals(OrderStatus::REFUNDING, $sm->getCurrentStatus());
+
+        $sm2 = $this->createStateMachine(OrderStatus::PENDING);
+        $sm2->apply(OrderEvent::PAY);
+        $sm2->apply(OrderEvent::SHIP);
+        $sm2->apply(OrderEvent::CONFIRM_RECEIPT);
+
+        $this->assertEquals(OrderStatus::DELIVERED, $sm2->getCurrentStatus());
+        $this->assertTrue(OrderStatus::isRefundable($sm2->getCurrentStatus()));
+        $this->assertTrue($sm2->can(OrderEvent::APPLY_REFUND));
+    }
+
+    public function testCannotApplyRefundFromPendingOrCompleted()
+    {
+        $sm = $this->createStateMachine(OrderStatus::PENDING);
+        $this->assertFalse(OrderStatus::isRefundable($sm->getCurrentStatus()));
+        $this->assertFalse($sm->can(OrderEvent::APPLY_REFUND));
+
+        $sm2 = $this->createStateMachine(OrderStatus::PENDING);
+        $sm2->apply(OrderEvent::PAY);
+        $sm2->apply(OrderEvent::SHIP);
+        $sm2->apply(OrderEvent::CONFIRM_RECEIPT);
+        $sm2->apply(OrderEvent::COMPLETE);
+
+        $this->assertEquals(OrderStatus::COMPLETED, $sm2->getCurrentStatus());
+        $this->assertFalse(OrderStatus::isRefundable($sm2->getCurrentStatus()));
+        $this->assertFalse($sm2->can(OrderEvent::APPLY_REFUND));
+    }
+
+    public function testMarkExceptionFromNonTerminalStatus()
+    {
+        $statuses = [
+            OrderStatus::PENDING,
+            OrderStatus::PAID,
+            OrderStatus::SHIPPED,
+            OrderStatus::DELIVERED,
+            OrderStatus::REFUNDING,
+        ];
+
+        foreach ($statuses as $status) {
+            $sm = $this->createStateMachine($status);
+            $this->assertTrue($sm->can(OrderEvent::MARK_EXCEPTION), "Status {$status} should allow mark_exception");
+
+            $context = new \stdClass();
+            $context->exceptionType = ExceptionType::PAYMENT_ABNORMAL;
+
+            $result = $sm->apply(OrderEvent::MARK_EXCEPTION, $context, 'admin_001', 'Payment timeout');
+            $this->assertTrue($result->isSuccess());
+            $this->assertEquals($status, $result->getFromStatus());
+            $this->assertEquals(OrderStatus::EXCEPTION, $result->getToStatus());
+            $this->assertEquals(OrderStatus::EXCEPTION, $sm->getCurrentStatus());
+            $this->assertEquals($status, $sm->getPreExceptionStatus());
+            $this->assertEquals('Payment timeout', $sm->getExceptionReason());
+            $this->assertEquals(ExceptionType::PAYMENT_ABNORMAL, $sm->getExceptionType());
+        }
+    }
+
+    public function testCannotMarkExceptionFromTerminalStatus()
+    {
+        $terminalStatuses = [
+            OrderStatus::COMPLETED,
+            OrderStatus::CANCELLED,
+            OrderStatus::REFUNDED,
+        ];
+
+        foreach ($terminalStatuses as $status) {
+            $sm = $this->createStateMachine($status);
+            $this->assertFalse($sm->can(OrderEvent::MARK_EXCEPTION), "Terminal status {$status} should not allow mark_exception");
+
+            $checkResult = $sm->checkCan(OrderEvent::MARK_EXCEPTION);
+            $this->assertFalse($checkResult['allowed']);
+            $this->assertEquals('terminal_status', $checkResult['error_code']);
+        }
+    }
+
+    public function testExceptionStateBlocksAllOperationsExceptResolve()
+    {
+        $sm = $this->createStateMachine(OrderStatus::PAID);
+        $sm->apply(OrderEvent::MARK_EXCEPTION, null, 'admin', 'Test exception');
+
+        $this->assertEquals(OrderStatus::EXCEPTION, $sm->getCurrentStatus());
+        $this->assertTrue($sm->can(OrderEvent::RESOLVE_EXCEPTION));
+
+        $blockedEvents = [
+            OrderEvent::PAY,
+            OrderEvent::SHIP,
+            OrderEvent::CANCEL,
+            OrderEvent::APPLY_REFUND,
+            OrderEvent::COMPLETE,
+            OrderEvent::MARK_EXCEPTION,
+            OrderEvent::ROLLBACK,
+        ];
+
+        foreach ($blockedEvents as $event) {
+            $this->assertFalse($sm->can($event), "Event {$event} should be blocked in exception state");
+            $checkResult = $sm->checkCan($event);
+            $this->assertFalse($checkResult['allowed']);
+            $this->assertEquals('exception_state', $checkResult['error_code']);
+        }
+
+        $this->expectException(StateMachineException::class);
+        $this->expectExceptionCode(StateMachineException::CODE_EXCEPTION_STATE);
+        $sm->apply(OrderEvent::SHIP);
+    }
+
+    public function testResolveExceptionBackToPreExceptionStatus()
+    {
+        $sm = $this->createStateMachine(OrderStatus::PAID);
+        $sm->apply(OrderEvent::MARK_EXCEPTION, null, 'admin', 'Payment issue');
+
+        $this->assertEquals(OrderStatus::EXCEPTION, $sm->getCurrentStatus());
+        $this->assertEquals(OrderStatus::PAID, $sm->getPreExceptionStatus());
+
+        $result = $sm->resolveException(OrderStatus::PAID, null, 'admin_002', 'Payment confirmed');
+        $this->assertTrue($result->isSuccess());
+        $this->assertEquals(OrderStatus::EXCEPTION, $result->getFromStatus());
+        $this->assertEquals(OrderStatus::PAID, $result->getToStatus());
+        $this->assertEquals(OrderStatus::PAID, $sm->getCurrentStatus());
+        $this->assertNull($sm->getExceptionReason());
+        $this->assertNull($sm->getPreExceptionStatus());
+        $this->assertNull($sm->getExceptionType());
+
+        $this->assertTrue($sm->can(OrderEvent::SHIP));
+    }
+
+    public function testResolveExceptionWithInvalidTargetStatus()
+    {
+        $sm = $this->createStateMachine(OrderStatus::PAID);
+        $sm->apply(OrderEvent::MARK_EXCEPTION);
+
+        $this->expectException(StateMachineException::class);
+        $this->expectExceptionCode(StateMachineException::CODE_VALIDATION_FAILED);
+        $sm->resolveException(OrderStatus::DELIVERED);
+    }
+
+    public function testResolveExceptionFromNonExceptionStatus()
+    {
+        $sm = $this->createStateMachine(OrderStatus::PAID);
+
+        $this->expectException(StateMachineException::class);
+        $this->expectExceptionCode(StateMachineException::CODE_INVALID_TRANSITION);
+        $sm->resolveException(OrderStatus::PAID);
+    }
+
+    public function testExceptionResolveTargetsByExceptionType()
+    {
+        $testCases = [
+            [
+                'preStatus' => OrderStatus::PAID,
+                'exceptionType' => ExceptionType::PAYMENT_ABNORMAL,
+                'expectedTargets' => [OrderStatus::PAID, OrderStatus::PENDING, OrderStatus::CANCELLED, OrderStatus::SHIPPED, OrderStatus::REFUNDING],
+            ],
+            [
+                'preStatus' => OrderStatus::SHIPPED,
+                'exceptionType' => ExceptionType::SHIPPING_ABNORMAL,
+                'expectedTargets' => [OrderStatus::SHIPPED, OrderStatus::PAID, OrderStatus::CANCELLED, OrderStatus::DELIVERED, OrderStatus::REFUNDING],
+            ],
+        ];
+
+        foreach ($testCases as $case) {
+            $sm = $this->createStateMachine($case['preStatus']);
+            $context = new \stdClass();
+            $context->exceptionType = $case['exceptionType'];
+            $sm->apply(OrderEvent::MARK_EXCEPTION, $context);
+
+            $allowedTargets = $sm->getAllowedResolveTargets();
+
+            foreach ($case['expectedTargets'] as $target) {
+                $this->assertContains($target, $allowedTargets,
+                    "Exception from {$case['preStatus']} with type {$case['exceptionType']} should allow resolve to {$target}");
+            }
+        }
+    }
+
+    public function testSingleStepRollback()
+    {
+        $sm = $this->createStateMachine(OrderStatus::PENDING);
+        $sm->apply(OrderEvent::PAY, null, 'user_001', 'Payment done');
+
+        $this->assertEquals(OrderStatus::PAID, $sm->getCurrentStatus());
+        $this->assertTrue($sm->can(OrderEvent::ROLLBACK));
+        $this->assertCount(1, $sm->getRollbackStack());
+
+        $rollbackStack = $sm->getRollbackStack();
+        $this->assertEquals(OrderStatus::PENDING, $rollbackStack[0]['from_status']);
+        $this->assertEquals(OrderStatus::PAID, $rollbackStack[0]['to_status']);
+        $this->assertEquals(OrderEvent::PAY, $rollbackStack[0]['event']);
+
+        $result = $sm->rollback(null, 'admin_001', 'Manual rollback');
+        $this->assertTrue($result->isSuccess());
+        $this->assertEquals(OrderStatus::PAID, $result->getFromStatus());
+        $this->assertEquals(OrderStatus::PENDING, $result->getToStatus());
+        $this->assertEquals(OrderEvent::ROLLBACK, $result->getEvent());
+        $this->assertEquals(OrderStatus::PENDING, $sm->getCurrentStatus());
+        $this->assertCount(0, $sm->getRollbackStack());
+    }
+
+    public function testMultipleStepRollback()
+    {
+        $sm = $this->createStateMachine(OrderStatus::PENDING, ['max_rollback_depth' => 5]);
+
+        $sm->apply(OrderEvent::PAY);
+        $sm->apply(OrderEvent::SHIP);
+        $sm->apply(OrderEvent::CONFIRM_RECEIPT);
+
+        $this->assertEquals(OrderStatus::DELIVERED, $sm->getCurrentStatus());
+        $this->assertCount(3, $sm->getRollbackStack());
+
+        $result = $sm->rollback();
+        $this->assertEquals(OrderStatus::SHIPPED, $sm->getCurrentStatus());
+        $this->assertCount(2, $sm->getRollbackStack());
+
+        $result = $sm->rollback();
+        $this->assertEquals(OrderStatus::PAID, $sm->getCurrentStatus());
+        $this->assertCount(1, $sm->getRollbackStack());
+
+        $result = $sm->rollback();
+        $this->assertEquals(OrderStatus::PENDING, $sm->getCurrentStatus());
+        $this->assertCount(0, $sm->getRollbackStack());
+
+        $this->assertFalse($sm->can(OrderEvent::ROLLBACK));
+    }
+
+    public function testRollbackDepthLimit()
+    {
+        $sm = $this->createStateMachine(OrderStatus::PENDING, ['max_rollback_depth' => 2]);
+
+        $sm->apply(OrderEvent::PAY);
+        $sm->apply(OrderEvent::SHIP);
+
+        $this->assertCount(2, $sm->getRollbackStack());
+
+        $checkResult = $sm->checkCan(OrderEvent::ROLLBACK);
+        $this->assertFalse($checkResult['allowed']);
+        $this->assertEquals('rollback_depth_exceeded', $checkResult['error_code']);
+
+        $this->expectException(StateMachineException::class);
+        $this->expectExceptionCode(StateMachineException::CODE_ROLLBACK_DEPTH_EXCEEDED);
+        $sm->rollback();
+    }
+
+    public function testRollbackDisabled()
+    {
+        $sm = $this->createStateMachine(OrderStatus::PENDING, ['rollback_enabled' => false]);
+        $sm->apply(OrderEvent::PAY);
+
+        $this->assertFalse($sm->can(OrderEvent::ROLLBACK));
+
+        $this->expectException(StateMachineException::class);
+        $this->expectExceptionCode(StateMachineException::CODE_ROLLBACK_DISABLED);
+        $sm->rollback();
+    }
+
+    public function testNoRollbackHistory()
+    {
+        $sm = $this->createStateMachine(OrderStatus::PENDING);
+
+        $this->assertFalse($sm->can(OrderEvent::ROLLBACK));
+
+        $this->expectException(StateMachineException::class);
+        $this->expectExceptionCode(StateMachineException::CODE_NO_ROLLBACK_HISTORY);
+        $sm->rollback();
+    }
+
+    public function testRollbackFromExceptionStateClearsException()
+    {
+        $sm = $this->createStateMachine(OrderStatus::PAID);
+        $sm->apply(OrderEvent::MARK_EXCEPTION, null, 'admin', 'Test exception');
+
+        $this->assertEquals(OrderStatus::EXCEPTION, $sm->getCurrentStatus());
+        $this->assertNotNull($sm->getExceptionReason());
+
+        $result = $sm->rollback();
+        $this->assertTrue($result->isSuccess());
+        $this->assertEquals(OrderStatus::PAID, $sm->getCurrentStatus());
+        $this->assertNull($sm->getExceptionReason());
+    }
+
+    public function testRollbackStackMaintainsMaxDepth()
+    {
+        $sm = $this->createStateMachine(OrderStatus::PENDING, ['max_rollback_depth' => 3]);
+
+        $sm->apply(OrderEvent::PAY);
+        $sm->apply(OrderEvent::SHIP);
+        $sm->apply(OrderEvent::CONFIRM_RECEIPT);
+        $sm->apply(OrderEvent::COMPLETE);
+
+        $this->assertCount(3, $sm->getRollbackStack());
+
+        $this->assertEquals(OrderStatus::COMPLETED, $sm->getCurrentStatus());
+    }
+
+    public function testRollbackClearedAfterReachingInitialState()
+    {
+        $sm = $this->createStateMachine(OrderStatus::PENDING, ['max_rollback_depth' => 5]);
+
+        $sm->apply(OrderEvent::PAY);
+        $sm->rollback();
+
+        $this->assertEquals(OrderStatus::PENDING, $sm->getCurrentStatus());
+        $this->assertEmpty($sm->getRollbackStack());
+        $this->assertFalse($sm->can(OrderEvent::ROLLBACK));
+    }
+
+    public function testTerminalStatusCannotTransition()
+    {
+        $terminalStatuses = [
+            OrderStatus::COMPLETED,
+            OrderStatus::CANCELLED,
+            OrderStatus::REFUNDED,
+        ];
+
+        $testEvents = [
+            OrderEvent::PAY,
+            OrderEvent::SHIP,
+            OrderEvent::CANCEL,
+            OrderEvent::APPLY_REFUND,
+            OrderEvent::COMPLETE,
+            OrderEvent::CONFIRM_RECEIPT,
+        ];
+
+        foreach ($terminalStatuses as $status) {
+            $sm = $this->createStateMachine($status);
+            $this->assertTrue(OrderStatus::isTerminal($status));
+
+            foreach ($testEvents as $event) {
+                $this->assertFalse($sm->can($event), "Terminal status {$status} should not allow {$event}");
+
+                $checkResult = $sm->checkCan($event);
+                $this->assertFalse($checkResult['allowed']);
+                $this->assertEquals('terminal_status', $checkResult['error_code']);
+            }
+
+            $this->expectException(StateMachineException::class);
+            $this->expectExceptionCode(StateMachineException::CODE_TERMINAL_STATUS);
+            $sm->apply(OrderEvent::PAY);
+        }
+    }
+
+    public function testAvailableEventsInEachStatus()
+    {
+        $testCases = [
+            [
+                'status' => OrderStatus::PENDING,
+                'expected' => [OrderEvent::PAY, OrderEvent::CANCEL, OrderEvent::MARK_EXCEPTION],
+                'notExpected' => [OrderEvent::SHIP, OrderEvent::COMPLETE],
+            ],
+            [
+                'status' => OrderStatus::PAID,
+                'expected' => [OrderEvent::SHIP, OrderEvent::CANCEL, OrderEvent::APPLY_REFUND, OrderEvent::MARK_EXCEPTION],
+                'notExpected' => [OrderEvent::PAY, OrderEvent::COMPLETE],
+            ],
+            [
+                'status' => OrderStatus::SHIPPED,
+                'expected' => [OrderEvent::CONFIRM_RECEIPT, OrderEvent::APPLY_REFUND, OrderEvent::MARK_EXCEPTION],
+                'notExpected' => [OrderEvent::PAY, OrderEvent::CANCEL],
+            ],
+            [
+                'status' => OrderStatus::DELIVERED,
+                'expected' => [OrderEvent::COMPLETE, OrderEvent::APPLY_REFUND, OrderEvent::MARK_EXCEPTION],
+                'notExpected' => [OrderEvent::PAY, OrderEvent::SHIP],
+            ],
+            [
+                'status' => OrderStatus::REFUNDING,
+                'expected' => [OrderEvent::APPROVE_REFUND, OrderEvent::REJECT_REFUND, OrderEvent::MARK_EXCEPTION],
+                'notExpected' => [OrderEvent::PAY, OrderEvent::SHIP],
+            ],
+            [
+                'status' => OrderStatus::EXCEPTION,
+                'expected' => [OrderEvent::RESOLVE_EXCEPTION],
+                'notExpected' => [OrderEvent::PAY, OrderEvent::SHIP, OrderEvent::CANCEL, OrderEvent::MARK_EXCEPTION],
+            ],
+            [
+                'status' => OrderStatus::COMPLETED,
+                'expected' => [],
+                'notExpected' => [OrderEvent::PAY, OrderEvent::SHIP, OrderEvent::CANCEL, OrderEvent::MARK_EXCEPTION],
+            ],
+        ];
+
+        foreach ($testCases as $case) {
+            $sm = $this->createStateMachine($case['status']);
+            $events = $sm->getAvailableEvents();
+
+            foreach ($case['expected'] as $expectedEvent) {
+                $this->assertContains($expectedEvent, $events,
+                    "Status {$case['status']} should have available event {$expectedEvent}");
+            }
+
+            foreach ($case['notExpected'] as $notExpectedEvent) {
+                $this->assertNotContains($notExpectedEvent, $events,
+                    "Status {$case['status']} should not have available event {$notExpectedEvent}");
+            }
+        }
+    }
+
+    public function testAvailableEventsWithDetailIncludesResolveTargets()
+    {
+        $sm = $this->createStateMachine(OrderStatus::PAID);
+        $context = new \stdClass();
+        $context->exceptionType = ExceptionType::PAYMENT_ABNORMAL;
+        $sm->apply(OrderEvent::MARK_EXCEPTION, $context);
+
+        $detail = $sm->getAvailableEventsWithDetail();
+        $this->assertCount(1, $detail);
+        $this->assertEquals(OrderEvent::RESOLVE_EXCEPTION, $detail[0]['event']);
+        $this->assertArrayHasKey('allowed_resolve_targets', $detail[0]);
+        $this->assertNotEmpty($detail[0]['allowed_resolve_targets']);
+    }
+
+    public function testRollbackAvailableAfterTransition()
+    {
+        $sm = $this->createStateMachine(OrderStatus::PENDING);
+
+        $events = $sm->getAvailableEvents();
+        $this->assertNotContains(OrderEvent::ROLLBACK, $events);
+
+        $sm->apply(OrderEvent::PAY);
+
+        $events = $sm->getAvailableEvents();
+        $this->assertContains(OrderEvent::ROLLBACK, $events);
+    }
+
+    public function testSnapshotAndRestorePreservesState()
+    {
+        $sm = $this->createStateMachine(OrderStatus::PENDING);
+        $sm->apply(OrderEvent::PAY, null, 'user_001', 'Payment');
+        $sm->apply(OrderEvent::MARK_EXCEPTION, null, 'admin', 'Issue found');
+
+        $snapshot = $sm->getSnapshot();
+        $this->assertEquals(OrderStatus::EXCEPTION, $snapshot['current_status']);
+        $this->assertEquals(OrderStatus::PAID, $snapshot['previous_status']);
+        $this->assertEquals(OrderStatus::PAID, $snapshot['pre_exception_status']);
+        $this->assertEquals('Issue found', $snapshot['exception_reason']);
+        $this->assertCount(2, $snapshot['rollback_stack']);
+
+        $sm2 = $this->createStateMachine(OrderStatus::PENDING);
+        $sm2->restoreFromSnapshot($snapshot);
+
+        $this->assertEquals(OrderStatus::EXCEPTION, $sm2->getCurrentStatus());
+        $this->assertEquals(OrderStatus::PAID, $sm2->getPreviousStatus());
+        $this->assertEquals(OrderStatus::PAID, $sm2->getPreExceptionStatus());
+        $this->assertEquals('Issue found', $sm2->getExceptionReason());
+        $this->assertCount(2, $sm2->getRollbackStack());
+
+        $this->assertTrue($sm2->can(OrderEvent::RESOLVE_EXCEPTION));
+        $result = $sm2->resolveException(OrderStatus::PAID);
+        $this->assertTrue($result->isSuccess());
+        $this->assertEquals(OrderStatus::PAID, $sm2->getCurrentStatus());
+    }
+
+    public function testTransitionResultToArray()
+    {
+        $sm = $this->createStateMachine(OrderStatus::PENDING);
+        $context = new \stdClass();
+        $context->amount = 100;
+
+        $result = $sm->apply(OrderEvent::PAY, $context, 'user_001', 'Test payment');
+        $arr = $result->toArray();
+
+        $this->assertTrue($arr['success']);
+        $this->assertEquals(OrderStatus::PENDING, $arr['from_status']);
+        $this->assertEquals(OrderStatus::PAID, $arr['to_status']);
+        $this->assertEquals(OrderEvent::PAY, $arr['event']);
+        $this->assertNotEmpty($arr['message']);
+        $this->assertEquals('user_001', $arr['operator_id']);
+        $this->assertEquals('Test payment', $arr['remark']);
+        $this->assertArrayHasKey('occurred_at', $arr);
+        $this->assertEquals(100, $arr['context']['amount']);
+    }
+
+    public function testCustomTransitionWithGuardAndCallbacks()
+    {
+        $sm = $this->createStateMachine(OrderStatus::PAID);
+
+        $beforeCalled = false;
+        $afterCalled = false;
+
+        $context = new class {
+            public $amount = 0;
+            public $processed = false;
+        };
+
+        $guard = function ($ctx) {
+            return $ctx->amount > 0;
+        };
+
+        $beforeCallback = function ($ctx) use (&$beforeCalled) {
+            $beforeCalled = true;
+        };
+
+        $afterCallback = function ($ctx) use (&$afterCalled) {
+            $ctx->processed = true;
+            $afterCalled = true;
+        };
+
+        $transition = new Transition(
+            OrderStatus::PAID,
+            'custom_test_event',
+            OrderStatus::SHIPPED,
+            $guard,
+            $beforeCallback,
+            $afterCallback
+        );
+        $sm->addTransition($transition);
+
+        $context->amount = 0;
+        $this->assertFalse($sm->can('custom_test_event', $context));
+        $checkResult = $sm->checkCan('custom_test_event', $context);
+        $this->assertEquals('guard_failed', $checkResult['error_code']);
+
+        $context->amount = 100;
+        $this->assertTrue($sm->can('custom_test_event', $context));
+
+        $result = $sm->apply('custom_test_event', $context);
+        $this->assertTrue($result->isSuccess());
+        $this->assertTrue($beforeCalled);
+        $this->assertTrue($afterCalled);
+        $this->assertTrue($context->processed);
+        $this->assertEquals(OrderStatus::SHIPPED, $sm->getCurrentStatus());
+    }
+
+    public function testTransitionBeforeCallbackFailureRollsBack()
+    {
+        $sm = $this->createStateMachine(OrderStatus::PENDING);
+
+        $transition = new Transition(
+            OrderStatus::PAID,
+            OrderEvent::SHIP,
+            OrderStatus::SHIPPED,
+            null,
+            function () {
+                throw new \RuntimeException('Before callback failed');
+            }
+        );
+        $sm->addTransition($transition);
+
+        $sm->apply(OrderEvent::PAY);
+        $this->assertEquals(OrderStatus::PAID, $sm->getCurrentStatus());
+
+        $this->expectException(StateMachineException::class);
+        $this->expectExceptionCode(StateMachineException::CODE_TRANSACTION_FAILED);
+
+        try {
+            $sm->apply(OrderEvent::SHIP);
+        } catch (StateMachineException $e) {
+            $this->assertEquals(OrderStatus::PAID, $sm->getCurrentStatus());
+            throw $e;
+        }
+    }
+
+    public function testFullClosedLoopNormalExceptionResolve()
+    {
+        $sm = $this->createStateMachine(OrderStatus::PENDING, ['max_rollback_depth' => 10]);
+
+        $sm->apply(OrderEvent::PAY);
+        $sm->apply(OrderEvent::SHIP);
+
+        $this->assertEquals(OrderStatus::SHIPPED, $sm->getCurrentStatus());
+
+        $context = new \stdClass();
+        $context->exceptionType = ExceptionType::SHIPPING_ABNORMAL;
+        $sm->apply(OrderEvent::MARK_EXCEPTION, $context, 'ops_001', 'Shipping address issue');
+
+        $this->assertEquals(OrderStatus::EXCEPTION, $sm->getCurrentStatus());
+        $this->assertEquals(OrderStatus::SHIPPED, $sm->getPreExceptionStatus());
+
+        $resolveResult = $sm->resolveException(OrderStatus::SHIPPED, null, 'ops_002', 'Address corrected');
+        $this->assertTrue($resolveResult->isSuccess());
+        $this->assertEquals(OrderStatus::SHIPPED, $sm->getCurrentStatus());
+
+        $sm->apply(OrderEvent::CONFIRM_RECEIPT);
+        $sm->apply(OrderEvent::COMPLETE);
+
+        $this->assertEquals(OrderStatus::COMPLETED, $sm->getCurrentStatus());
+        $this->assertTrue(OrderStatus::isTerminal($sm->getCurrentStatus()));
+
+        $history = $sm->getHistory();
+        $events = array_map(function ($h) { return $h->getEvent(); }, $history);
+        $this->assertContains(OrderEvent::PAY, $events);
+        $this->assertContains(OrderEvent::MARK_EXCEPTION, $events);
+        $this->assertContains(OrderEvent::RESOLVE_EXCEPTION, $events);
+        $this->assertContains(OrderEvent::COMPLETE, $events);
+    }
+
+    public function testFullClosedLoopExceptionRollback()
+    {
+        $sm = $this->createStateMachine(OrderStatus::PENDING, ['max_rollback_depth' => 10]);
+
+        $sm->apply(OrderEvent::PAY);
+        $sm->apply(OrderEvent::SHIP);
+        $sm->apply(OrderEvent::CONFIRM_RECEIPT);
+
+        $this->assertEquals(OrderStatus::DELIVERED, $sm->getCurrentStatus());
+
+        $sm->apply(OrderEvent::MARK_EXCEPTION, null, 'admin', 'Wrong item delivered');
+        $this->assertEquals(OrderStatus::EXCEPTION, $sm->getCurrentStatus());
+
+        $rollbackResult = $sm->rollback(null, 'admin', 'Rollback exception state');
+        $this->assertTrue($rollbackResult->isSuccess());
+        $this->assertEquals(OrderStatus::DELIVERED, $sm->getCurrentStatus());
+        $this->assertNull($sm->getExceptionReason());
+
+        $rollbackResult = $sm->rollback();
+        $this->assertEquals(OrderStatus::SHIPPED, $sm->getCurrentStatus());
+
+        $rollbackResult = $sm->rollback();
+        $this->assertEquals(OrderStatus::PAID, $sm->getCurrentStatus());
+
+        $sm->apply(OrderEvent::APPLY_REFUND);
+        $sm->apply(OrderEvent::APPROVE_REFUND);
+
+        $this->assertEquals(OrderStatus::REFUNDED, $sm->getCurrentStatus());
+        $this->assertTrue(OrderStatus::isTerminal($sm->getCurrentStatus()));
+    }
+
+    public function testFullClosedLoopRefundRejectContinueFlow()
+    {
+        $sm = $this->createStateMachine(OrderStatus::PENDING, ['max_rollback_depth' => 10]);
+
+        $sm->apply(OrderEvent::PAY);
+        $sm->apply(OrderEvent::SHIP);
+
+        $sm->apply(OrderEvent::APPLY_REFUND);
+        $this->assertEquals(OrderStatus::REFUNDING, $sm->getCurrentStatus());
+
+        $sm->apply(OrderEvent::REJECT_REFUND);
+        $this->assertEquals(OrderStatus::PAID, $sm->getCurrentStatus());
+
+        $sm->rollback();
+        $this->assertEquals(OrderStatus::SHIPPED, $sm->getCurrentStatus());
+
+        $sm->apply(OrderEvent::CONFIRM_RECEIPT);
+        $sm->apply(OrderEvent::COMPLETE);
+
+        $this->assertEquals(OrderStatus::COMPLETED, $sm->getCurrentStatus());
+        $this->assertTrue(OrderStatus::isTerminal($sm->getCurrentStatus()));
+    }
+
+    public function testExceptionWithTypeThenResolveToAlternateStatus()
+    {
+        $sm = $this->createStateMachine(OrderStatus::PAID);
+
+        $context = new \stdClass();
+        $context->exceptionType = ExceptionType::PAYMENT_ABNORMAL;
+        $sm->apply(OrderEvent::MARK_EXCEPTION, $context, 'admin', 'Suspected fraud');
+
+        $this->assertEquals(OrderStatus::EXCEPTION, $sm->getCurrentStatus());
+        $this->assertContains(OrderStatus::CANCELLED, $sm->getAllowedResolveTargets());
+
+        $resolveResult = $sm->resolveException(OrderStatus::CANCELLED, null, 'admin_002', 'Cancelled due to fraud');
+        $this->assertTrue($resolveResult->isSuccess());
+        $this->assertEquals(OrderStatus::CANCELLED, $sm->getCurrentStatus());
+        $this->assertTrue(OrderStatus::isTerminal($sm->getCurrentStatus()));
+    }
+
+    public function testAllOrderStatusesExist()
+    {
+        foreach (OrderStatus::ALL as $status) {
+            $this->assertTrue(OrderStatus::exists($status));
+            $this->assertNotEmpty(OrderStatus::getLabel($status));
+            $this->assertNotEmpty(OrderStatus::getColor($status));
+        }
+
+        $this->assertFalse(OrderStatus::exists('non_existent_status'));
+    }
+
+    public function testAllOrderEventsExist()
+    {
+        foreach (OrderEvent::ALL as $event) {
+            $this->assertTrue(OrderEvent::exists($event));
+            $this->assertNotEmpty(OrderEvent::getLabel($event));
+        }
+
+        $this->assertFalse(OrderEvent::exists('non_existent_event'));
+    }
+
+    public function testIsTerminalCorrectlyIdentifiesTerminalStatuses()
+    {
+        $this->assertTrue(OrderStatus::isTerminal(OrderStatus::COMPLETED));
+        $this->assertTrue(OrderStatus::isTerminal(OrderStatus::CANCELLED));
+        $this->assertTrue(OrderStatus::isTerminal(OrderStatus::REFUNDED));
+
+        $nonTerminal = [
+            OrderStatus::PENDING,
+            OrderStatus::PAID,
+            OrderStatus::SHIPPED,
+            OrderStatus::DELIVERED,
+            OrderStatus::REFUNDING,
+            OrderStatus::EXCEPTION,
+        ];
+
+        foreach ($nonTerminal as $status) {
+            $this->assertFalse(OrderStatus::isTerminal($status), "Status {$status} should not be terminal");
+        }
+    }
+
+    public function testIsRefundableCorrectlyIdentifiesRefundableStatuses()
+    {
+        $refundable = [
+            OrderStatus::PAID,
+            OrderStatus::SHIPPED,
+            OrderStatus::DELIVERED,
+        ];
+
+        foreach ($refundable as $status) {
+            $this->assertTrue(OrderStatus::isRefundable($status), "Status {$status} should be refundable");
+        }
+
+        $nonRefundable = [
+            OrderStatus::PENDING,
+            OrderStatus::COMPLETED,
+            OrderStatus::CANCELLED,
+            OrderStatus::REFUNDING,
+            OrderStatus::REFUNDED,
+            OrderStatus::EXCEPTION,
+        ];
+
+        foreach ($nonRefundable as $status) {
+            $this->assertFalse(OrderStatus::isRefundable($status), "Status {$status} should not be refundable");
+        }
+    }
+
+    public function testGetTransitionMap()
+    {
+        $sm = $this->createStateMachine(OrderStatus::PENDING);
+        $map = $sm->getTransitionMap();
+
+        $this->assertArrayHasKey(OrderStatus::PENDING, $map);
+        $this->assertArrayHasKey(OrderStatus::PAID, $map);
+        $this->assertArrayHasKey(OrderStatus::SHIPPED, $map);
+        $this->assertArrayHasKey(OrderStatus::DELIVERED, $map);
+        $this->assertArrayHasKey(OrderStatus::REFUNDING, $map);
+
+        $pendingTransitions = $map[OrderStatus::PENDING];
+        $pendingEvents = array_column($pendingTransitions, 'event');
+        $this->assertContains(OrderEvent::PAY, $pendingEvents);
+        $this->assertContains(OrderEvent::CANCEL, $pendingEvents);
+    }
+
+    public function testInvalidInitialStatusThrowsException()
+    {
+        $this->expectException(StateMachineException::class);
+        $this->expectExceptionCode(StateMachineException::CODE_INVALID_STATUS);
+        new StateMachine('invalid_status');
+    }
+
+    public function testInvalidEventThrowsException()
+    {
+        $sm = $this->createStateMachine(OrderStatus::PENDING);
+
+        $this->expectException(StateMachineException::class);
+        $this->expectExceptionCode(StateMachineException::CODE_INVALID_EVENT);
+        $sm->apply('invalid_event');
+    }
+
+    public function testCheckCanReturnsDetailedErrorForInvalidTransition()
+    {
+        $sm = $this->createStateMachine(OrderStatus::PENDING);
+
+        $result = $sm->checkCan(OrderEvent::SHIP);
+        $this->assertFalse($result['allowed']);
+        $this->assertEquals('invalid_transition', $result['error_code']);
+        $this->assertNotEmpty($result['error_message']);
+        $this->assertNotEmpty($result['suggestion']);
+        $this->assertArrayHasKey('allowed_events', $result);
+        $this->assertContains(OrderEvent::PAY, $result['allowed_events']);
+        $this->assertContains(OrderEvent::CANCEL, $result['allowed_events']);
+    }
+
+    public function testGetValidationErrorsReturnsStructuredErrors()
+    {
+        $sm = $this->createStateMachine(OrderStatus::COMPLETED);
+
+        $errors = $sm->getValidationErrors(OrderEvent::SHIP);
+        $this->assertNotEmpty($errors);
+        $this->assertEquals('terminal_status', $errors['code']);
+        $this->assertNotEmpty($errors['message']);
+        $this->assertNotEmpty($errors['suggestion']);
+
+        $sm2 = $this->createStateMachine(OrderStatus::PENDING);
+        $noErrors = $sm2->getValidationErrors(OrderEvent::PAY);
+        $this->assertEmpty($noErrors);
+    }
+
+    public function testForceTransitionWhenDisabled()
+    {
+        $sm = $this->createStateMachine(OrderStatus::PENDING, ['allow_force_transition' => false]);
+
+        $this->expectException(StateMachineException::class);
+        $this->expectExceptionCode(StateMachineException::CODE_VALIDATION_FAILED);
+        $sm->forceTransition(OrderStatus::COMPLETED);
+    }
+
+    public function testForceTransitionWhenEnabled()
+    {
+        $sm = $this->createStateMachine(OrderStatus::PENDING, ['allow_force_transition' => true]);
+
+        $result = $sm->forceTransition(OrderStatus::COMPLETED, 'admin_001', 'Force complete');
+        $this->assertTrue($result->isSuccess());
+        $this->assertEquals(OrderStatus::PENDING, $result->getFromStatus());
+        $this->assertEquals(OrderStatus::COMPLETED, $result->getToStatus());
+        $this->assertEquals('force_transition', $result->getEvent());
+        $this->assertEquals(OrderStatus::COMPLETED, $sm->getCurrentStatus());
+    }
+
+    public function testForceTransitionWithInvalidStatus()
+    {
+        $sm = $this->createStateMachine(OrderStatus::PENDING, ['allow_force_transition' => true]);
+
+        $this->expectException(StateMachineException::class);
+        $this->expectExceptionCode(StateMachineException::CODE_INVALID_STATUS);
+        $sm->forceTransition('invalid_status');
+    }
+
+    public function testSyncStatus()
+    {
+        $sm = $this->createStateMachine(OrderStatus::PENDING);
+
+        $sm->syncStatus(OrderStatus::PA

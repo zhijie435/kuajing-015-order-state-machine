@@ -17,6 +17,7 @@ class StateMachineException extends Exception
     const CODE_VALIDATION_FAILED = 1009;
     const CODE_TRANSACTION_FAILED = 1010;
     const CODE_ROLLBACK_AUDIT_REQUIRED = 1011;
+    const CODE_PERMISSION_DENIED = 1012;
 
     public static function invalidTransition(string $from, string $event, ?string $suggestion = null): self
     {
@@ -102,5 +103,14 @@ class StateMachineException extends Exception
             sprintf('该订单受回滚保护，需要审核通过后才能执行回滚操作，%s，请提交回滚审核申请或联系管理员', $reason),
             self::CODE_ROLLBACK_AUDIT_REQUIRED
         );
+    }
+
+    public static function permissionDenied(string $permission, string $description = ''): self
+    {
+        $message = sprintf('权限不足，缺少 "%s" 权限', $permission);
+        if ($description !== '' && $description !== $permission) {
+            $message .= sprintf('（%s）', $description);
+        }
+        return new self($message . '，请联系管理员开通权限', self::CODE_PERMISSION_DENIED);
     }
 }

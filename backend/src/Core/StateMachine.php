@@ -369,8 +369,13 @@ class StateMachine
     {
         $fromStatus = $this->currentStatus;
         $this->previousStatus = $fromStatus;
+        $this->preExceptionStatus = $fromStatus;
         $this->currentStatus = OrderStatus::EXCEPTION;
         $this->exceptionReason = $remark ?: '未说明的异常';
+
+        if ($context !== null && isset($context->exceptionType)) {
+            $this->exceptionType = $context->exceptionType;
+        }
 
         $this->pushToRollbackStack($fromStatus, OrderEvent::MARK_EXCEPTION, $context, $operatorId, $remark);
 
@@ -400,10 +405,24 @@ class StateMachine
             throw StateMachineException::invalidStatus($targetStatus);
         }
 
+        if (!$this->isValidResolveTarget($targetStatus)) {
+            $allowedTargets = $this->getAllowedResolveTargets();
+            throw StateMachineException::validationFailed(
+                sprintf(
+                    '异常恢复目标状态 "%s" 不合法，当前异常来源状态为 "%s"，允许的目标状态: %s',
+                    OrderStatus::getLabel($targetStatus),
+                    $this->preExceptionStatus ? OrderStatus::getLabel($this->preExceptionStatus) : '未知',
+                    implode('、', array_map([OrderStatus::class, 'getLabel'], $allowedTargets))
+                )
+            );
+        }
+
         $fromStatus = $this->currentStatus;
         $this->currentStatus = $targetStatus;
         $this->previousStatus = OrderStatus::EXCEPTION;
         $this->exceptionReason = null;
+        $this->preExceptionStatus = null;
+        $this->exceptionType = null;
 
         $result = new TransitionResult(
             true,
@@ -419,6 +438,55 @@ class StateMachine
         $this->logTransition($result);
 
         return $result;
+    }
+
+    private function isValidResolveTarget(string $targetStatus): bool
+    {
+        $allowedTargets = $this->getAllowedResolveTargets();
+        if (empty($allowedTargets)) {
+            return true;
+        }
+        return in_array($targetStatus, $allowedTargets, true);
+    }
+
+    public function getAllowedResolveTargets(): array
+    {
+        if ($this->currentStatus !== OrderStatus::EXCEPTION) {
+            return [];
+        }
+
+        $targets = [];
+
+        if ($this->preExceptionStatus !== null) {
+            $targets[] = $this->preExceptionStatus;
+        }
+
+        if ($this->exceptionType !== null && isset(self::EXCEPTION_RESOLVE_MAP[$this->exceptionType])) {
+            $typeTargets = self::EXCEPTION_RESOLVE_MAP[$this->exceptionType];
+            if (!empty($typeTargets)) {
+                foreach ($typeTargets as $t) {
+                    if (!in_array($t, $targets, true)) {
+                        $targets[] = $t;
+                    }
+                }
+            } else {
+                return [];
+            }
+        }
+
+        if ($this->preExceptionStatus !== null) {
+            foreach ($this->transitions as $key => $transition) {
+                [$fromStatus, $event] = explode('.', $key, 2);
+                if ($fromStatus === $this->preExceptionStatus) {
+                    $toStatus = $transition->getToStatus();
+                    if (!in_array($toStatus, $targets, true)) {
+                        $targets[] = $toStatus;
+                    }
+                }
+            }
+        }
+
+        return $targets;
     }
 
     private function pushToRollbackStack(string $fromStatus, string $event, ?object $context, string $operatorId, string $remark): void
@@ -521,6 +589,32 @@ class StateMachine
         return $availableEvents;
     }
 
+    public function getAvailableEventsWithDetail(): array
+    {
+        $events = $this->getAvailableEvents();
+        $detail = [];
+
+        foreach ($events as $event) {
+            $item = [
+                'event' => $event,
+                'label' => OrderEvent::getLabel($event),
+            ];
+
+            if ($event === OrderEvent::RESOLVE_EXCEPTION) {
+                $item['allowed_resolve_targets'] = array_map(function ($status) {
+                    return [
+                        'status' => $status,
+                        'label' => OrderStatus::getLabel($status),
+                    ];
+                }, $this->getAllowedResolveTargets());
+            }
+
+            $detail[] = $item;
+        }
+
+        return $detail;
+    }
+
     public function forceTransition(string $toStatus, string $operatorId = '', string $remark = ''): TransitionResult
     {
         if (!$this->config['allow_force_transition']) {
@@ -576,6 +670,8 @@ class StateMachine
             'previous_status' => $this->previousStatus,
             'rollback_stack' => $this->rollbackStack,
             'exception_reason' => $this->exceptionReason,
+            'pre_exception_status' => $this->preExceptionStatus,
+            'exception_type' => $this->exceptionType,
         ];
     }
 
@@ -592,6 +688,12 @@ class StateMachine
         }
         if (isset($snapshot['exception_reason'])) {
             $this->exceptionReason = $snapshot['exception_reason'];
+        }
+        if (isset($snapshot['pre_exception_status'])) {
+            $this->preExceptionStatus = $snapshot['pre_exception_status'];
+        }
+        if (isset($snapshot['exception_type'])) {
+            $this->exceptionType = $snapshot['exception_type'];
         }
     }
 

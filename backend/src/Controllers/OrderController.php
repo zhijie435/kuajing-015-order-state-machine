@@ -19,6 +19,8 @@ class OrderController
 
     public function handleRequest(string $action, array $params): array
     {
+        $this->initOperatorContext($params);
+
         try {
             switch ($action) {
                 case 'create':
@@ -283,6 +285,8 @@ class OrderController
         $orderId = (int) ($params['order_id'] ?? 0);
         $reason = $params['reason'] ?? '';
         $operatorId = $params['operator_id'] ?? '';
+        $exceptionType = $params['exception_type'] ?? \Order\Enums\ExceptionType::OTHER;
+        $exceptionLevel = isset($params['exception_level']) ? (int) $params['exception_level'] : \Order\Enums\ExceptionLevel::MEDIUM;
 
         if ($orderId <= 0) {
             return ApiResponse::error('订单ID不能为空', 40004);
@@ -292,7 +296,7 @@ class OrderController
             return ApiResponse::error('异常原因不能为空', 40007);
         }
 
-        $result = $this->orderService->markException($orderId, $reason, $operatorId);
+        $result = $this->orderService->markExceptionWithType($orderId, $reason, $operatorId, $exceptionType, $exceptionLevel);
 
         return ApiResponse::success([
             'transition' => $result->toArray(),
@@ -724,5 +728,20 @@ class OrderController
         }
 
         return $context;
+    }
+
+    private function initOperatorContext(array $params): void
+    {
+        $operatorId = $params['operator_id'] ?? '';
+        $role = $params['operator_role'] ?? '';
+        $dealerId = isset($params['dealer_id']) ? (int) $params['dealer_id'] : null;
+
+        if ($operatorId !== '' || $role !== '') {
+            \PermissionService::setOperatorContext(
+                $operatorId ?: null,
+                $role ?: null,
+                $dealerId
+            );
+        }
     }
 }
