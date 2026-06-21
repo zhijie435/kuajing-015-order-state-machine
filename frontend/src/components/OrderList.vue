@@ -136,9 +136,10 @@
       </template>
     </el-dialog>
 
-    <el-drawer v-model="showDetailDrawer" title="订单详情" size="80%">
+    <el-drawer v-model="showDetailDrawer" title="订单详情" size="80%" @close="handleDrawerClose">
       <OrderStateMachine
         v-if="selectedOrderId"
+        :key="selectedOrderId"
         :order-id="selectedOrderId"
         @status-changed="onStatusChanged"
         @error="onError"
@@ -231,6 +232,10 @@ const handleCurrentChange = (page) => {
   loadOrders()
 }
 
+const handleDrawerClose = () => {
+  selectedOrderId.value = null
+}
+
 const viewDetail = (row) => {
   selectedOrderId.value = row.id
   showDetailDrawer.value = true
@@ -300,8 +305,19 @@ const quickMarkException = async (row) => {
   }
 }
 
-const onStatusChanged = (data) => {
-  loadOrders()
+const onStatusChanged = async (data) => {
+  const previousFilterStatus = filter.status
+  await loadOrders()
+  
+  if (selectedOrderId.value && previousFilterStatus) {
+    const updatedOrder = orders.value.find(o => o.id === selectedOrderId.value)
+    if (!updatedOrder) {
+      showDetailDrawer.value = false
+      selectedOrderId.value = null
+      ElMessage.info('订单状态已变更，不再符合当前筛选条件')
+    }
+  }
+  
   emit('status-changed', data)
 }
 

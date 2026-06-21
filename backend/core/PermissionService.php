@@ -38,6 +38,9 @@ class PermissionService
             $perms = self::getPermissionsByRole($role);
             self::$operatorContext['roles'] = [$role];
             self::$operatorContext['permissions'] = $perms;
+            if ($dealerId === null) {
+                self::$operatorContext['dealer_id'] = null;
+            }
         }
         if ($dealerId !== null) {
             self::$operatorContext['dealer_id'] = $dealerId;
@@ -113,10 +116,8 @@ class PermissionService
 
     public static function canViewWallet(int $dealerId): bool
     {
-        if (self::isAdmin()) {
-            if (self::hasPermission(self::PERM_WALLET_VIEW_ALL)) {
-                return true;
-            }
+        if (self::hasPermission(self::PERM_WALLET_VIEW_ALL)) {
+            return true;
         }
 
         $currentDealerId = self::getCurrentDealerId();

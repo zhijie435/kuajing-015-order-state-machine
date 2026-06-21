@@ -663,6 +663,21 @@ const confirmResolveException = async () => {
   }
 }
 
+const resetState = () => {
+  order.value = null
+  statusLogs.value = []
+  loading.value = ''
+  showExceptionDialog.value = false
+  showResolveDialog.value = false
+  lastValidationError.value = null
+  consistencyCheck.value = null
+  failureInfo.value = null
+  exceptionForm.reason = ''
+  exceptionForm.remark = ''
+  resolveForm.target_status = ''
+  resolveForm.remark = ''
+}
+
 onMounted(() => {
   loadStateMachineConfig()
   loadOrderDetail()
@@ -671,6 +686,7 @@ onMounted(() => {
 watch(
   () => props.orderId,
   () => {
+    resetState()
     loadOrderDetail()
   }
 )

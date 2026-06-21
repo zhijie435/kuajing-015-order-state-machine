@@ -299,7 +299,7 @@ namespace {
         {
             $sql = preg_replace('/\s+FOR\s+UPDATE\s*$/i', '', $sql);
 
-            if (!preg_match('/SELECT\s+(.+?)\s+FROM\s+(\w+)(?:\s+WHERE\s+(.+))?(?:\s+ORDER\s+BY\s+(.+?))?(?:\s+LIMIT\s+(.+?))?$/is', $sql, $m)) {
+            if (!preg_match('/SELECT\s+(.+?)\s+FROM\s+(\w+)(?:\s+WHERE\s+(.+?))?(?:\s+ORDER\s+BY\s+(.+?))?(?:\s+LIMIT\s+(.+?))?$/is', $sql, $m)) {
                 $stmt->setResultSet([]);
                 return;
             }
